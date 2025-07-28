@@ -213,25 +213,25 @@ sudo make install
 
 ## Implementation Phases
 
-### Phase 1: Core Infrastructure (Week 1-2)
+### Phase 1: Core Infrastructure
 1. Implement image handler classes for raw and EWF formats
 2. Create basic journal superblock detection
 3. Implement journal header parsing
 4. Design CSV output structure
 
-### Phase 2: Journal Parsing (Week 3-4)
+### Phase 2: Journal Parsing
 1. Parse descriptor blocks and extract filesystem block lists
 2. Parse commit blocks and transaction boundaries
 3. Implement revocation block handling
 4. Add transaction sequence tracking
 
-### Phase 3: Data Interpretation (Week 5-6)
+### Phase 3: Data Interpretation
 1. Correlate journal data with filesystem metadata
 2. Implement inode resolution where possible
 3. Add directory entry reconstruction
 4. Implement file path resolution
 
-### Phase 4: Enhanced Features (Week 7-8)
+### Phase 4: Enhanced Features
 1. Add filtering and search capabilities
 2. Implement integrity checking
 3. Add progress reporting
