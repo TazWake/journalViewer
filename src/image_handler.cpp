@@ -134,45 +134,116 @@ bool ImageHandler::locateJournal(long manual_offset, long manual_size) {
 }
 
 bool ImageHandler::findJournalInSuperblock() {
-    // EXT2/3/4 superblock is at offset 1024 (1KB)
+    // EXT2/3/4 superblock is at offset 1024 (1KB) from partition start
     const long superblock_offset = 1024;
     const size_t superblock_size = 1024;
     char superblock[1024];
     
     if (!readBytes(superblock_offset, superblock, superblock_size)) {
-        std::cerr << "Error: Failed to read superblock" << std::endl;
+        std::cerr << "Error: Failed to read superblock at offset " << (superblock_offset + partition_offset) << std::endl;
         return false;
     }
     
     // Check EXT magic number (0xEF53 at offset 56 in superblock)
     uint16_t* magic = reinterpret_cast<uint16_t*>(&superblock[56]);
     if (*magic != 0xEF53) {
-        std::cerr << "Error: Invalid EXT filesystem magic number" << std::endl;
+        std::cerr << "Error: Invalid EXT filesystem magic number (got 0x" << std::hex << *magic 
+                  << ", expected 0xEF53) at partition offset " << partition_offset << std::endl;
         return false;
     }
     
-    // For EXT3/4, journal is typically at inode 8
-    // This is a simplified implementation - in reality, we'd need to:
-    // 1. Parse the superblock to get block size and inode table location
-    // 2. Read inode 8 to get journal location
-    // 3. Validate journal superblock
+    // Parse superblock to get block size and other filesystem parameters
+    uint32_t* log_block_size = reinterpret_cast<uint32_t*>(&superblock[24]);
+    uint32_t block_size = 1024 << *log_block_size;
     
-    // For now, use a common default location (simplified)
-    long estimated_journal_offset = 32768; // Common location after superblock area
+    // Get filesystem features to check if it has a journal
+    uint32_t* feature_compat = reinterpret_cast<uint32_t*>(&superblock[92]);
+    uint32_t* feature_incompat = reinterpret_cast<uint32_t*>(&superblock[96]);
     
-    if (validateJournalMagic(estimated_journal_offset)) {
-        journal_location.offset = estimated_journal_offset;
+    const uint32_t EXT3_FEATURE_COMPAT_HAS_JOURNAL = 0x0004;
+    const uint32_t EXT4_FEATURE_INCOMPAT_JOURNAL_DEV = 0x0008;
+    
+    bool has_journal = (*feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL) != 0;
+    bool is_journal_dev = (*feature_incompat & EXT4_FEATURE_INCOMPAT_JOURNAL_DEV) != 0;
+    
+    if (!has_journal && !is_journal_dev) {
+        std::cerr << "Error: Filesystem does not have a journal (EXT2?)" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Found EXT filesystem with block size " << block_size << " bytes" << std::endl;
+    
+    // Try to locate journal by reading inode 8 (journal inode)
+    // First, calculate inode table location
+    uint32_t* inodes_per_group = reinterpret_cast<uint32_t*>(&superblock[40]);
+    uint32_t* first_data_block = reinterpret_cast<uint32_t*>(&superblock[20]);
+    
+    // Group descriptor is right after the superblock
+    long group_desc_offset = (*first_data_block + 1) * block_size;
+    char group_desc[32]; // Group descriptor is 32 bytes for EXT2/3, 64 for EXT4
+    
+    if (!readBytes(group_desc_offset, group_desc, 32)) {
+        std::cerr << "Error: Failed to read group descriptor" << std::endl;
+        return false;
+    }
+    
+    // Get inode table block number from group descriptor
+    uint32_t* inode_table_block = reinterpret_cast<uint32_t*>(&group_desc[8]);
+    long inode_table_offset = *inode_table_block * block_size;
+    
+    // Journal is at inode 8, each inode is typically 128 or 256 bytes
+    uint16_t* inode_size = reinterpret_cast<uint16_t*>(&superblock[88]);
+    uint16_t actual_inode_size = (*inode_size > 0) ? *inode_size : 128;
+    
+    long journal_inode_offset = inode_table_offset + (8 - 1) * actual_inode_size; // inode 8 (0-based = 7)
+    char journal_inode[256];
+    
+    if (!readBytes(journal_inode_offset, journal_inode, actual_inode_size)) {
+        std::cerr << "Error: Failed to read journal inode" << std::endl;
+        return false;
+    }
+    
+    // Get the first block pointer from the inode (offset 40 in inode structure)
+    uint32_t* first_block = reinterpret_cast<uint32_t*>(&journal_inode[40]);
+    if (*first_block == 0) {
+        std::cerr << "Error: Journal inode has no data blocks" << std::endl;
+        return false;
+    }
+    
+    long journal_offset = *first_block * block_size;
+    
+    std::cout << "Checking journal at block " << *first_block << " (offset " << journal_offset << ")" << std::endl;
+    
+    if (validateJournalMagic(journal_offset)) {
+        journal_location.offset = journal_offset;
         journal_location.size = 0; // Will be determined from journal superblock
         journal_location.found = true;
+        std::cout << "Found journal at offset " << journal_offset << std::endl;
         return true;
     }
     
-    // If not found at common location, search in first few MB
-    for (long offset = 8192; offset < 1048576; offset += 4096) {
-        if (validateJournalMagic(offset)) {
-            journal_location.offset = offset;
+    // Fallback: search for journal in common locations
+    std::cout << "Journal not found at expected location, searching..." << std::endl;
+    
+    // Search in various common locations relative to filesystem start
+    long search_offsets[] = {
+        32768,      // 32KB - common default
+        65536,      // 64KB
+        131072,     // 128KB  
+        262144,     // 256KB
+        524288,     // 512KB
+        1048576,    // 1MB
+        block_size * 10,  // 10 blocks in
+        block_size * 100, // 100 blocks in
+        0  // Sentinel
+    };
+    
+    for (int i = 0; search_offsets[i] != 0; i++) {
+        if (validateJournalMagic(search_offsets[i])) {
+            journal_location.offset = search_offsets[i];
             journal_location.size = 0;
             journal_location.found = true;
+            std::cout << "Found journal at offset " << search_offsets[i] << std::endl;
             return true;
         }
     }
@@ -184,14 +255,37 @@ bool ImageHandler::findJournalInSuperblock() {
 bool ImageHandler::validateJournalMagic(long offset) {
     char header[12];
     if (!readBytes(offset, header, 12)) {
+        std::cerr << "Debug: Cannot read journal header at offset " << offset << std::endl;
         return false;
     }
     
     // Check for JBD2 magic number (0xC03B3998) in big-endian format
     uint32_t* magic = reinterpret_cast<uint32_t*>(header);
     uint32_t jbd2_magic = 0x9839B3C0; // Little-endian representation of big-endian 0xC03B3998
+    uint32_t jbd_magic = 0x98393BC0;  // JBD (EXT3) magic - different byte order
     
-    return (*magic == jbd2_magic);
+    std::cout << "Debug: Magic at offset " << offset << " = 0x" << std::hex << *magic 
+              << " (expected JBD2: 0x" << jbd2_magic << " or JBD: 0x" << jbd_magic << ")" << std::dec << std::endl;
+    
+    // Try both JBD2 (EXT4) and JBD (EXT3) magic numbers
+    bool is_jbd2 = (*magic == jbd2_magic);
+    bool is_jbd = (*magic == jbd_magic);
+    
+    if (is_jbd2) {
+        std::cout << "Debug: Found JBD2 (EXT4) journal magic" << std::endl;
+    } else if (is_jbd) {
+        std::cout << "Debug: Found JBD (EXT3) journal magic" << std::endl;
+    } else {
+        // Also try the reverse byte order in case of endianness issues
+        uint32_t reversed_magic = 0xC03B3998; // Big-endian format
+        if (*magic == reversed_magic) {
+            std::cout << "Debug: Found journal magic in big-endian format" << std::endl;
+            return true;
+        }
+        std::cout << "Debug: No valid journal magic found" << std::endl;
+    }
+    
+    return (is_jbd2 || is_jbd);
 }
 
 bool ImageHandler::readBytes(long offset, char* buffer, size_t size) {
