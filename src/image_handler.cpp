@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <libewf.h>
 
-ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO) {
+ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO), partition_offset(0) {
     journal_location = {0, 0, false};
 }
 
@@ -110,9 +110,19 @@ bool ImageHandler::openEWFImage(const std::string& path) {
     return true;
 }
 
+void ImageHandler::setPartitionOffset(long offset) {
+    if (offset < 0) {
+        std::cerr << "Warning: Negative partition offset (" << offset << ") ignored.\n";
+        partition_offset = 0;
+    } else {
+        partition_offset = offset;
+    }
+}
+
 bool ImageHandler::locateJournal(long manual_offset, long manual_size) {
     if (manual_offset >= 0) {
-        // Use manual offset
+        // Use manual offset - this should be relative to the partition start
+        // The readBytes method will automatically apply the partition offset
         journal_location.offset = manual_offset;
         journal_location.size = (manual_size > 0) ? manual_size : 0;
         journal_location.found = validateJournalMagic(manual_offset);
@@ -185,13 +195,23 @@ bool ImageHandler::validateJournalMagic(long offset) {
 }
 
 bool ImageHandler::readBytes(long offset, char* buffer, size_t size) {
+    // Apply partition offset to the requested offset
+    long adjusted_offset = offset + partition_offset;
+    
+    // Basic sanity check to prevent obviously invalid reads
+    if (adjusted_offset < 0 || size == 0 || size > 1024 * 1024) {
+        std::cerr << "Warning: Invalid read request - offset: " << adjusted_offset 
+                  << ", size: " << size << "\n";
+        return false;
+    }
+    
     if (current_type == ImageType::RAW && raw_file) {
-        raw_file->seekg(offset);
+        raw_file->seekg(adjusted_offset);
         raw_file->read(buffer, size);
         return raw_file->good() && raw_file->gcount() == static_cast<std::streamsize>(size);
     } else if (current_type == ImageType::EWF && ewf_handle) {
         libewf_error_t* error = nullptr;
-        if (libewf_handle_seek_offset(static_cast<libewf_handle_t*>(ewf_handle), offset, SEEK_SET, &error) == -1) {
+        if (libewf_handle_seek_offset(static_cast<libewf_handle_t*>(ewf_handle), adjusted_offset, SEEK_SET, &error) == -1) {
             return false;
         }
         ssize_t read_count = libewf_handle_read_buffer(

@@ -18,6 +18,9 @@ void print_usage(const char* program_name) {
     std::cout << "      --version          Display version information\n";
     std::cout << "      --journal-offset   Manual journal offset (bytes)\n";
     std::cout << "      --journal-size     Manual journal size (bytes)\n";
+    std::cout << "      --partition-offset <sectors>  Partition offset in 512-byte sectors\n";
+    std::cout << "      --partition-offset-bytes <bytes>  Partition offset in bytes\n";
+    std::cout << "      --sector-size <size>  Sector size in bytes [default: 512]\n";
     std::cout << "      --start-seq        Start from specific sequence number\n";
     std::cout << "      --end-seq          End at specific sequence number\n";
     std::cout << "      --no-header        Omit CSV header row\n\n";
@@ -25,6 +28,8 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " -i evidence.E01 -o journal_analysis.csv -v\n";
     std::cout << "  " << program_name << " -i disk.dd -o output.csv --journal-offset 1048576\n";
     std::cout << "  " << program_name << " -i evidence.E01 -o filtered.csv --start-seq 100 --end-seq 200\n";
+    std::cout << "  " << program_name << " -i starkskunk5.E01 -o partition6.csv --partition-offset 227328\n";
+    std::cout << "  " << program_name << " -i starkskunk5.E01 -o partition6.csv --partition-offset-bytes 116391936\n";
 }
 
 void print_version() {
@@ -40,6 +45,9 @@ int main(int argc, char* argv[]) {
     bool no_header = false;
     long journal_offset = -1;
     long journal_size = -1;
+    long partition_offset_sectors = -1;
+    long partition_offset_bytes = -1;
+    int sector_size = 512;
     int start_seq = -1;
     int end_seq = -1;
 
@@ -53,6 +61,9 @@ int main(int argc, char* argv[]) {
         {"version", no_argument, 0, 0},
         {"journal-offset", required_argument, 0, 0},
         {"journal-size", required_argument, 0, 0},
+        {"partition-offset", required_argument, 0, 0},
+        {"partition-offset-bytes", required_argument, 0, 0},
+        {"sector-size", required_argument, 0, 0},
         {"start-seq", required_argument, 0, 0},
         {"end-seq", required_argument, 0, 0},
         {"no-header", no_argument, 0, 0},
@@ -87,6 +98,12 @@ int main(int argc, char* argv[]) {
                     journal_offset = std::stol(optarg);
                 } else if (strcmp(long_options[option_index].name, "journal-size") == 0) {
                     journal_size = std::stol(optarg);
+                } else if (strcmp(long_options[option_index].name, "partition-offset") == 0) {
+                    partition_offset_sectors = std::stol(optarg);
+                } else if (strcmp(long_options[option_index].name, "partition-offset-bytes") == 0) {
+                    partition_offset_bytes = std::stol(optarg);
+                } else if (strcmp(long_options[option_index].name, "sector-size") == 0) {
+                    sector_size = std::stoi(optarg);
                 } else if (strcmp(long_options[option_index].name, "start-seq") == 0) {
                     start_seq = std::stoi(optarg);
                 } else if (strcmp(long_options[option_index].name, "end-seq") == 0) {
@@ -116,11 +133,43 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Validate and calculate partition offset
+    long final_partition_offset = 0;
+    if (partition_offset_sectors >= 0 && partition_offset_bytes >= 0) {
+        std::cerr << "Error: Cannot specify both --partition-offset and --partition-offset-bytes.\n";
+        return 1;
+    }
+    
+    if (partition_offset_sectors >= 0) {
+        if (sector_size <= 0 || sector_size > 8192) {
+            std::cerr << "Error: Invalid sector size. Must be between 1 and 8192 bytes.\n";
+            return 1;
+        }
+        final_partition_offset = partition_offset_sectors * sector_size;
+    } else if (partition_offset_bytes >= 0) {
+        final_partition_offset = partition_offset_bytes;
+    }
+    
+    if (final_partition_offset < 0) {
+        std::cerr << "Error: Partition offset cannot be negative.\n";
+        return 1;
+    }
+    
+    // Additional validation for reasonable partition offset values
+    const long max_reasonable_offset = 1024LL * 1024 * 1024 * 1024; // 1TB
+    if (final_partition_offset > max_reasonable_offset) {
+        std::cerr << "Warning: Partition offset (" << final_partition_offset 
+                  << " bytes) is unusually large. This may cause issues.\n";
+    }
+
     if (verbose) {
         std::cout << "ext-journal-analyzer starting...\n";
         std::cout << "Input image: " << input_image << "\n";
         std::cout << "Output CSV: " << output_csv << "\n";
         std::cout << "Image type: " << image_type << "\n";
+        if (final_partition_offset > 0) {
+            std::cout << "Partition offset: " << final_partition_offset << " bytes\n";
+        }
     }
 
     try {
@@ -134,6 +183,12 @@ int main(int argc, char* argv[]) {
         if (!image_handler.openImage(input_image, image_type)) {
             std::cerr << "Error: Failed to open image file: " << input_image << "\n";
             return 1;
+        }
+
+        // Set partition offset if specified
+        if (final_partition_offset > 0) {
+            image_handler.setPartitionOffset(final_partition_offset);
+            if (verbose) std::cout << "Applied partition offset: " << final_partition_offset << " bytes\n";
         }
 
         // Locate journal

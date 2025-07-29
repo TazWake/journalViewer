@@ -24,6 +24,7 @@ private:
     ImageType current_type;
     std::string image_path;
     JournalLocation journal_location;
+    long partition_offset;
     
     // Helper methods
     ImageType detectImageType(const std::string& path);
@@ -38,6 +39,7 @@ public:
     
     // Main interface methods
     bool openImage(const std::string& path, const std::string& type_str = "auto");
+    void setPartitionOffset(long offset);
     bool locateJournal(long manual_offset = -1, long manual_size = -1);
     
     // Data reading methods
@@ -48,6 +50,7 @@ public:
     long getJournalOffset() const { return journal_location.offset; }
     long getJournalSize() const { return journal_location.size; }
     bool isJournalFound() const { return journal_location.found; }
+    long getPartitionOffset() const { return partition_offset; }
     ImageType getImageType() const { return current_type; }
     const std::string& getImagePath() const { return image_path; }
 };
