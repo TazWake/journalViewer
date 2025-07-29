@@ -214,21 +214,59 @@ bool ImageHandler::findJournalInSuperblock() {
         std::cout << std::endl;
     }
     
-    // Get the first block pointer from the inode (offset 40 in inode structure)
-    uint32_t* first_block = reinterpret_cast<uint32_t*>(&journal_inode[40]);
-    uint32_t* second_block = reinterpret_cast<uint32_t*>(&journal_inode[44]);
-    uint32_t* third_block = reinterpret_cast<uint32_t*>(&journal_inode[48]);
+    // Check if inode uses extents (EXT4 feature)
+    uint32_t* inode_flags = reinterpret_cast<uint32_t*>(&journal_inode[32]);
+    const uint32_t EXT4_EXTENTS_FL = 0x00080000;
+    bool uses_extents = (*inode_flags & EXT4_EXTENTS_FL) != 0;
     
-    std::cout << "Debug: Block pointers - [0]=" << *first_block << " [1]=" << *second_block << " [2]=" << *third_block << std::endl;
+    std::cout << "Debug: Inode flags = 0x" << std::hex << *inode_flags << std::dec 
+              << (uses_extents ? " (uses extents)" : " (direct blocks)") << std::endl;
     
-    if (*first_block == 0) {
+    uint32_t journal_block = 0;
+    
+    if (uses_extents) {
+        // Parse extent header at offset 40
+        uint16_t* extent_magic = reinterpret_cast<uint16_t*>(&journal_inode[40]);
+        uint16_t* extent_entries = reinterpret_cast<uint16_t*>(&journal_inode[42]);
+        uint16_t* extent_max = reinterpret_cast<uint16_t*>(&journal_inode[44]);
+        uint16_t* extent_depth = reinterpret_cast<uint16_t*>(&journal_inode[46]);
+        
+        std::cout << "Debug: Extent header - magic=0x" << std::hex << *extent_magic 
+                  << " entries=" << std::dec << *extent_entries 
+                  << " max=" << *extent_max << " depth=" << *extent_depth << std::endl;
+        
+        if (*extent_magic == 0xF30A && *extent_entries > 0) {
+            // Read first extent entry (starts at offset 48)
+            uint32_t* extent_block = reinterpret_cast<uint32_t*>(&journal_inode[48]);  // logical block
+            uint16_t* extent_len = reinterpret_cast<uint16_t*>(&journal_inode[52]);    // length
+            uint16_t* extent_start_hi = reinterpret_cast<uint16_t*>(&journal_inode[54]); // high 16 bits
+            uint32_t* extent_start_lo = reinterpret_cast<uint32_t*>(&journal_inode[56]); // low 32 bits
+            
+            // Combine high and low parts for 48-bit block number
+            journal_block = *extent_start_lo | (static_cast<uint64_t>(*extent_start_hi) << 32);
+            
+            std::cout << "Debug: First extent - logical=" << *extent_block 
+                      << " len=" << *extent_len 
+                      << " physical=" << journal_block << std::endl;
+        } else {
+            std::cerr << "Error: Invalid extent header magic (0x" << std::hex << *extent_magic << ")" << std::endl;
+            return false;
+        }
+    } else {
+        // Traditional direct block pointers
+        uint32_t* first_block = reinterpret_cast<uint32_t*>(&journal_inode[40]);
+        journal_block = *first_block;
+        std::cout << "Debug: Direct block pointer = " << journal_block << std::endl;
+    }
+    
+    if (journal_block == 0) {
         std::cerr << "Error: Journal inode has no data blocks" << std::endl;
         return false;
     }
     
-    long journal_offset = *first_block * block_size;
+    long journal_offset = journal_block * block_size;
     
-    std::cout << "Checking journal at block " << *first_block << " (offset " << journal_offset << ")" << std::endl;
+    std::cout << "Checking journal at block " << journal_block << " (offset " << journal_offset << ")" << std::endl;
     
     if (validateJournalMagic(journal_offset)) {
         journal_location.offset = journal_offset;
