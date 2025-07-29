@@ -71,6 +71,9 @@ sudo make install
 - `--version` - Display version information
 - `--journal-offset <bytes>` - Manual journal offset (for direct access)
 - `--journal-size <bytes>` - Manual journal size specification
+- `--partition-offset <sectors>` - Partition offset in 512-byte sectors
+- `--partition-offset-bytes <bytes>` - Partition offset in bytes
+- `--sector-size <size>` - Sector size in bytes [default: 512]
 - `--start-seq <number>` - Start from specific transaction sequence number
 - `--end-seq <number>` - End at specific transaction sequence number
 - `--no-header` - Omit CSV header row
@@ -89,7 +92,17 @@ sudo make install
 
 #### Manual Journal Location
 ```bash
-./ext-journal-analyzer -i disk.dd -o output.csv --journal-offset 1048576
+# Using calculated journal offset (from debugfs inode 8 extent data)
+./ext-journal-analyzer -i example.raw -o example.csv --journal-offset 1073741824
+```
+
+#### Multi-Partition Images
+```bash
+# Process specific partition (using mmls output - partition 6 at sector 227328)
+./ext-journal-analyzer -i starkskunk5.E01 -o partition6.csv --partition-offset 227328
+
+# Or using byte offset
+./ext-journal-analyzer -i starkskunk5.E01 -o partition6.csv --partition-offset-bytes 116391936
 ```
 
 #### Filter Transaction Range
@@ -145,6 +158,34 @@ This tool is designed for defensive security and digital forensics:
 - **Simplified Parsing**: Current implementation provides foundational journal parsing
 - **Timestamp Accuracy**: Relies on journal commit records for timing information
 - **Path Resolution**: File path reconstruction depends on available directory metadata
+
+## Troubleshooting
+
+### Journal Not Found Error
+If you encounter "Warning: Journal not found in filesystem", try these steps:
+
+1. **Verify filesystem has journal:**
+   ```bash
+   sudo fsck.ext4 -n /dev/loop0  # Should show journal recovery message
+   ```
+
+2. **Check journal location:**
+   ```bash
+   # Get journal inode details
+   debugfs -R "stat <8>" example.raw
+   
+   # Calculate offset: start_block × block_size (usually 4096)
+   # Example: block 262144 × 4096 = 1073741824 bytes
+   ```
+
+3. **For multi-partition images, use partition offset:**
+   ```bash
+   # Get partition layout
+   mmls example.raw
+   
+   # Use partition offset for target partition
+   ./ext-journal-analyzer -i example.raw --partition-offset 227328
+   ```
 
 ## Error Handling
 
