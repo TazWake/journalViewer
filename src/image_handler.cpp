@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 #include <libewf.h>
 
 ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO), partition_offset(0) {
@@ -203,8 +204,23 @@ bool ImageHandler::findJournalInSuperblock() {
         return false;
     }
     
+    // Debug: Dump first 64 bytes of journal inode
+    std::cout << "Debug: Journal inode contents (first 64 bytes):" << std::endl;
+    for (int i = 0; i < 64; i += 16) {
+        std::cout << "  Offset " << i << ": ";
+        for (int j = 0; j < 16 && i + j < 64; j++) {
+            printf("%02x ", (unsigned char)journal_inode[i + j]);
+        }
+        std::cout << std::endl;
+    }
+    
     // Get the first block pointer from the inode (offset 40 in inode structure)
     uint32_t* first_block = reinterpret_cast<uint32_t*>(&journal_inode[40]);
+    uint32_t* second_block = reinterpret_cast<uint32_t*>(&journal_inode[44]);
+    uint32_t* third_block = reinterpret_cast<uint32_t*>(&journal_inode[48]);
+    
+    std::cout << "Debug: Block pointers - [0]=" << *first_block << " [1]=" << *second_block << " [2]=" << *third_block << std::endl;
+    
     if (*first_block == 0) {
         std::cerr << "Error: Journal inode has no data blocks" << std::endl;
         return false;
