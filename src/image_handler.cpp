@@ -237,17 +237,37 @@ bool ImageHandler::findJournalInSuperblock() {
         
         if (*extent_magic == 0xF30A && *extent_entries > 0) {
             // Read first extent entry (starts at offset 48)
-            uint32_t* extent_block = reinterpret_cast<uint32_t*>(&journal_inode[48]);  // logical block
-            uint16_t* extent_len = reinterpret_cast<uint16_t*>(&journal_inode[52]);    // length
-            uint16_t* extent_start_hi = reinterpret_cast<uint16_t*>(&journal_inode[54]); // high 16 bits
-            uint32_t* extent_start_lo = reinterpret_cast<uint32_t*>(&journal_inode[56]); // low 32 bits
+            // EXT4 extent entry format: logical(4) + len(2) + start_hi(2) + start_lo(4)
+            uint32_t* extent_logical = reinterpret_cast<uint32_t*>(&journal_inode[48]);
+            uint16_t* extent_len = reinterpret_cast<uint16_t*>(&journal_inode[52]);
+            uint16_t* extent_start_hi = reinterpret_cast<uint16_t*>(&journal_inode[54]);
+            uint32_t* extent_start_lo = reinterpret_cast<uint32_t*>(&journal_inode[56]);
             
-            // Combine high and low parts for 48-bit block number
-            journal_block = *extent_start_lo | (static_cast<uint64_t>(*extent_start_hi) << 32);
+            // The extent data from hex dump: 00 00 00 00 00 00 00 00 00 40 00 00 00 00 04 00
+            // This should be: logical=0, len=0, start_hi=0x4000, start_lo=0x00040000
+            // But we need to check the actual byte order...
             
-            std::cout << "Debug: First extent - logical=" << *extent_block 
+            std::cout << "Debug: Raw extent bytes:" << std::endl;
+            for (int i = 48; i < 64; i++) {
+                printf(" %02x", (unsigned char)journal_inode[i]);
+            }
+            std::cout << std::endl;
+            
+            // Try interpreting the data differently - the TSK shows 262144 decimal = 0x40000 hex
+            // Looking at bytes 48-63: 00 00 00 00 00 00 00 00 00 40 00 00 00 00 04 00
+            // This might be: logical=0(4bytes) len=0(2bytes) pad(2bytes) start_lo=0x40000(4bytes) start_hi=0x4(4bytes)
+            uint32_t* alt_start_lo = reinterpret_cast<uint32_t*>(&journal_inode[56]);
+            uint32_t* alt_start_hi = reinterpret_cast<uint32_t*>(&journal_inode[60]);
+            
+            journal_block = *alt_start_lo | (static_cast<uint64_t>(*alt_start_hi) << 32);
+            
+            std::cout << "Debug: Extent parsing - logical=" << *extent_logical 
                       << " len=" << *extent_len 
-                      << " physical=" << journal_block << std::endl;
+                      << " start_hi=" << *extent_start_hi
+                      << " start_lo=" << *extent_start_lo
+                      << " alt_start_lo=" << *alt_start_lo
+                      << " alt_start_hi=" << *alt_start_hi
+                      << " calculated_block=" << journal_block << std::endl;
         } else {
             std::cerr << "Error: Invalid extent header magic (0x" << std::hex << *extent_magic << ")" << std::endl;
             return false;
