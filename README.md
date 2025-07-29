@@ -19,17 +19,17 @@ A forensic tool for analyzing EXT3/4 filesystem journals from disk images. This 
 #### Ubuntu/Debian
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libewf-dev
+sudo apt-get install build-essential cmake libewf-dev pkg-config
 ```
 
 #### RHEL/CentOS 7
 ```bash
-sudo yum install gcc-c++ cmake libewf-devel
+sudo yum install gcc-c++ cmake libewf-devel pkgconfig
 ```
 
 #### RHEL/CentOS 8+
 ```bash
-sudo dnf install gcc-c++ cmake libewf-devel
+sudo dnf install gcc-c++ cmake libewf-devel pkgconf-pkg-config
 ```
 
 ### Building the Tool

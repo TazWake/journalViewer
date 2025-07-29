@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <cstring>
 #include <getopt.h>
 #include "image_handler.h"
 #include "journal_parser.h"

@@ -1,6 +1,7 @@
 #include "image_handler.h"
 #include <iostream>
 #include <cstring>
+#include <algorithm>
 #include <libewf.h>
 
 ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO) {
@@ -190,11 +191,13 @@ bool ImageHandler::readBytes(long offset, char* buffer, size_t size) {
         return raw_file->good() && raw_file->gcount() == static_cast<std::streamsize>(size);
     } else if (current_type == ImageType::EWF && ewf_handle) {
         libewf_error_t* error = nullptr;
-        ssize_t read_count = libewf_handle_read_buffer_at_offset(
+        if (libewf_handle_seek_offset(static_cast<libewf_handle_t*>(ewf_handle), offset, SEEK_SET, &error) == -1) {
+            return false;
+        }
+        ssize_t read_count = libewf_handle_read_buffer(
             static_cast<libewf_handle_t*>(ewf_handle),
             reinterpret_cast<uint8_t*>(buffer),
             size,
-            offset,
             &error
         );
         return (read_count == static_cast<ssize_t>(size));
