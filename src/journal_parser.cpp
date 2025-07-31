@@ -29,6 +29,11 @@ static const uint8_t EXT4_FT_FIFO_DIR = 5;         // FIFO (in dir entry)
 static const uint8_t EXT4_FT_SOCK_DIR = 6;         // Socket (in dir entry)
 static const uint8_t EXT4_FT_SYMLINK_DIR = 7;      // Symbolic link (in dir entry)
 
+// DirectoryTreeBuilder static member definitions
+const uint32_t DirectoryTreeBuilder::EXT4_ROOT_INODE = 2;
+const uint32_t DirectoryTreeBuilder::EXT4_LOST_FOUND_INODE = 11;
+const size_t DirectoryTreeBuilder::MAX_PATH_DEPTH = 256;
+
 JournalParser::JournalParser() {
 }
 
