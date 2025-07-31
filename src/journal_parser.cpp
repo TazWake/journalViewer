@@ -359,6 +359,32 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                                     data_trans.file_type = "file_data";
                                     data_trans.change_type = "data_change";
                                     data_trans.full_path = "/data_block_" + std::to_string(desc.fs_block_num);
+                                    
+                                    // Perform string analysis on file data blocks
+                                    StringAnalysis string_analysis = analyzeDataBlockStrings(data_block_buffer, BLOCK_SIZE);
+                                    if (string_analysis.total_printable_strings > 0) {
+                                        // Update operation type if we found interesting strings
+                                        if (string_analysis.contains_text_files) {
+                                            data_trans.operation_type = "text_file_update";
+                                            data_trans.file_type = "text_file";
+                                        } else if (string_analysis.contains_config_files) {
+                                            data_trans.operation_type = "config_file_update";
+                                            data_trans.file_type = "config_file";
+                                        } else if (string_analysis.contains_log_entries) {
+                                            data_trans.operation_type = "log_file_update";
+                                            data_trans.file_type = "log_file";
+                                        }
+                                        
+                                        // Store sample strings in file_path for forensic analysis
+                                        if (!string_analysis.sample_strings.empty()) {
+                                            std::string sample_content = "STRINGS: ";
+                                            for (size_t i = 0; i < std::min(size_t(3), string_analysis.sample_strings.size()); ++i) {
+                                                if (i > 0) sample_content += " | ";
+                                                sample_content += string_analysis.sample_strings[i];
+                                            }
+                                            data_trans.file_path = sample_content.substr(0, 200); // Limit length
+                                        }
+                                    }
                                     break;
                                 }
                                 
@@ -1198,8 +1224,26 @@ void JournalParser::performForensicAnalysis(const std::vector<JournalTransaction
     // Detect journal mode
     forensic_analysis.detected_mode = detectJournalMode(transactions);
     
-    // Set journal type based on magic number
-    forensic_analysis.journal_type = "JBD (EXT3)"; // Set during parsing
+    // Set journal type based on magic number (determined during parsing)
+    // Note: Both EXT3 and EXT4 can use JBD2 format journals
+    if (!transactions.empty()) {
+        // Determine journal format from first valid transaction
+        for (const auto& trans : transactions) {
+            if (trans.transaction_seq > 0) {
+                // Check if this appears to be a JBD2 format based on features
+                bool has_advanced_features = (trans.file_size > 0 || !trans.filename.empty() || !trans.full_path.empty());
+                if (has_advanced_features) {
+                    forensic_analysis.journal_type = "JBD2 (EXT3+/EXT4)";
+                } else {
+                    forensic_analysis.journal_type = "JBD (EXT3+)";
+                }
+                break;
+            }
+        }
+    }
+    if (forensic_analysis.journal_type.empty()) {
+        forensic_analysis.journal_type = "JBD/JBD2 (EXT3+)";
+    }
     
     // Analyze sequence ranges
     uint32_t min_seq = UINT32_MAX, max_seq = 0;
@@ -1219,7 +1263,25 @@ void JournalParser::performForensicAnalysis(const std::vector<JournalTransaction
         if (trans.block_type == "descriptor") forensic_analysis.descriptor_blocks++;
         else if (trans.block_type == "commit") forensic_analysis.commit_blocks++;
         else if (trans.block_type == "revocation") forensic_analysis.revocation_blocks++;
-        else if (trans.block_type == "data") forensic_analysis.data_blocks_found++;
+        else if (trans.block_type == "data") {
+            forensic_analysis.data_blocks_found++;
+            
+            // Analyze string content in data blocks
+            if (!trans.file_path.empty() && trans.file_path.find("STRINGS:") == 0) {
+                forensic_analysis.data_blocks_with_strings++;
+                
+                // Count block types based on operation
+                if (trans.operation_type == "text_file_update") forensic_analysis.text_file_blocks++;
+                else if (trans.operation_type == "config_file_update") forensic_analysis.config_file_blocks++;
+                else if (trans.operation_type == "log_file_update") forensic_analysis.log_file_blocks++;
+                
+                // Extract sample strings for forensic summary
+                if (forensic_analysis.sample_extracted_strings.size() < 5) {
+                    std::string sample = trans.file_path.substr(9); // Remove "STRINGS: " prefix
+                    forensic_analysis.sample_extracted_strings.push_back(sample);
+                }
+            }
+        }
     }
     
     forensic_analysis.sequence_range_start = (min_seq == UINT32_MAX) ? 0 : min_seq;
@@ -1308,8 +1370,9 @@ void JournalParser::analyzeTransactionPatterns(const std::vector<JournalTransact
 
 void JournalParser::generateForensicSummary() const {
     std::cout << "\n=== FORENSIC ANALYSIS SUMMARY ===" << std::endl;
-    std::cout << "Journal Type: " << forensic_analysis.journal_type << std::endl;
-    std::cout << "Detected Mode: " << getJournalModeString(forensic_analysis.detected_mode) << std::endl;
+    std::cout << "Journal Format: " << forensic_analysis.journal_type << std::endl;
+    std::cout << "Inferred Mode: " << getJournalModeString(forensic_analysis.detected_mode) 
+              << " (inferred from transaction patterns)" << std::endl;
     std::cout << "Total Transactions: " << forensic_analysis.total_transactions << std::endl;
     std::cout << "Sequence Range: " << forensic_analysis.sequence_range_start 
               << " - " << forensic_analysis.sequence_range_end << std::endl;
@@ -1323,9 +1386,49 @@ void JournalParser::generateForensicSummary() const {
     
     std::cout << "\n--- Forensic Indicators ---" << std::endl;
     std::cout << "Metadata-Only Mode: " << (forensic_analysis.metadata_only_mode ? "YES" : "NO") << std::endl;
-    std::cout << "Potential Data Recovery: " << (forensic_analysis.potential_data_recovery ? "YES" : "NO") << std::endl;
+    std::cout << "Data Blocks Present: " << (forensic_analysis.potential_data_recovery ? "YES" : "NO") << std::endl;
+    if (forensic_analysis.potential_data_recovery) {
+        std::cout << "String Extraction Potential: HIGH (data blocks contain file content)" << std::endl;
+        std::cout << "Recommended Analysis: Extract human-readable strings from data blocks" << std::endl;
+    } else {
+        std::cout << "String Extraction Potential: LIMITED (metadata-only journal)" << std::endl;
+        std::cout << "Recommended Analysis: Focus on filename/path metadata strings" << std::endl;
+    }
     std::cout << "High Activity Detected: " << (forensic_analysis.high_activity_detected ? "YES" : "NO") << std::endl;
     std::cout << "Transaction Gaps: " << forensic_analysis.transaction_gaps << std::endl;
+    
+    // Add string analysis results
+    if (forensic_analysis.data_blocks_with_strings > 0) {
+        std::cout << "\n--- STRING ANALYSIS RESULTS ---" << std::endl;
+        std::cout << "Data Blocks with Readable Content: " << forensic_analysis.data_blocks_with_strings 
+                  << " / " << forensic_analysis.data_blocks_found 
+                  << " (" << (forensic_analysis.data_blocks_with_strings * 100 / forensic_analysis.data_blocks_found) << "%)" << std::endl;
+        
+        if (forensic_analysis.text_file_blocks > 0) {
+            std::cout << "Text File Blocks: " << forensic_analysis.text_file_blocks << std::endl;
+        }
+        if (forensic_analysis.config_file_blocks > 0) {
+            std::cout << "Configuration File Blocks: " << forensic_analysis.config_file_blocks << std::endl;
+        }
+        if (forensic_analysis.log_file_blocks > 0) {
+            std::cout << "Log File Blocks: " << forensic_analysis.log_file_blocks << std::endl;
+        }
+        
+        if (!forensic_analysis.sample_extracted_strings.empty()) {
+            std::cout << "Sample Extracted Content:" << std::endl;
+            for (size_t i = 0; i < std::min(size_t(3), forensic_analysis.sample_extracted_strings.size()); ++i) {
+                std::cout << "  [" << (i+1) << "] " << forensic_analysis.sample_extracted_strings[i] << std::endl;
+            }
+        }
+        
+        std::cout << "Forensic Value: EXCELLENT - Recoverable file content detected" << std::endl;
+        std::cout << "Next Steps: Full string extraction and content analysis recommended" << std::endl;
+    } else {
+        std::cout << "\n--- STRING ANALYSIS RESULTS ---" << std::endl;
+        std::cout << "Data Blocks with Readable Content: 0 / " << forensic_analysis.data_blocks_found << std::endl;
+        std::cout << "Forensic Value: LIMITED - No readable strings in data blocks" << std::endl;
+        std::cout << "Possible Causes: Encrypted data, binary data, or compressed content" << std::endl;
+    }
     
     if (forensic_analysis.detected_mode == JournalMode::ORDERED_MODE) {
         std::cout << "\n--- ORDERED MODE ANALYSIS ---" << std::endl;
@@ -1333,6 +1436,13 @@ void JournalParser::generateForensicSummary() const {
         std::cout << "Forensic Value: File metadata changes, directory operations, inode updates." << std::endl;
         std::cout << "Limitation: File content data is NOT journaled in this mode." << std::endl;
         std::cout << "Recommendation: Focus on metadata timeline analysis for user activity." << std::endl;
+    } else if (forensic_analysis.detected_mode == JournalMode::JOURNAL_MODE) {
+        std::cout << "\n--- JOURNAL MODE ANALYSIS ---" << std::endl;
+        std::cout << "This journal operates in JOURNAL mode (full data+metadata journaling)." << std::endl;
+        std::cout << "Forensic Value: Complete file content, metadata, directory operations." << std::endl;
+        std::cout << "Data Recovery Potential: HIGH - File content is journaled before commit." << std::endl;
+        std::cout << "String Analysis: Examine data blocks for recoverable file fragments." << std::endl;
+        std::cout << "Recommendation: Extract and analyze data blocks for deleted/modified content." << std::endl;
     }
     
     std::cout << "\n--- TIMING ANALYSIS ---" << std::endl;
@@ -1347,9 +1457,9 @@ void JournalParser::generateForensicSummary() const {
 
 std::string JournalParser::getJournalModeString(JournalMode mode) const {
     switch (mode) {
-        case JournalMode::JOURNAL_MODE: return "JOURNAL (Full data+metadata journaling)";
-        case JournalMode::ORDERED_MODE: return "ORDERED (Metadata-only journaling)";
-        case JournalMode::WRITEBACK_MODE: return "WRITEBACK (Critical metadata only)";
+        case JournalMode::JOURNAL_MODE: return "JOURNAL (Full data+metadata)";
+        case JournalMode::ORDERED_MODE: return "ORDERED (Metadata-only)";
+        case JournalMode::WRITEBACK_MODE: return "WRITEBACK (Critical metadata)";
         default: return "UNKNOWN";
     }
 }
@@ -1363,4 +1473,143 @@ std::string JournalParser::generateRelativeTimestamp(uint32_t sequence_num, uint
     } else {
         return "T" + std::to_string(relative_pos);
     }
+}
+
+JournalParser::StringAnalysis JournalParser::analyzeDataBlockStrings(const char* data, size_t size) const {
+    StringAnalysis analysis;
+    
+    if (!data || size == 0) return analysis;
+    
+    std::vector<std::string> strings;
+    std::string current_string;
+    
+    // Extract null-terminated and printable strings
+    for (size_t i = 0; i < size; ++i) {
+        char c = data[i];
+        
+        if (std::isprint(c) && c != '\0') {
+            current_string += c;
+        } else {
+            // End of string - process if long enough
+            if (current_string.length() >= analysis.min_string_length) {
+                strings.push_back(current_string);
+                analysis.total_string_bytes += current_string.length();
+                analysis.max_string_length = std::max(analysis.max_string_length, current_string.length());
+                
+                // Check for interesting content
+                if (containsPotentiallyInterestingContent(current_string)) {
+                    if (analysis.sample_strings.size() < 10) { // Keep up to 10 samples
+                        analysis.sample_strings.push_back(current_string);
+                    }
+                }
+            }
+            current_string.clear();
+        }
+    }
+    
+    // Process final string if data doesn't end with null
+    if (current_string.length() >= analysis.min_string_length) {
+        strings.push_back(current_string);
+        analysis.total_string_bytes += current_string.length();
+        analysis.max_string_length = std::max(analysis.max_string_length, current_string.length());
+        
+        if (containsPotentiallyInterestingContent(current_string)) {
+            if (analysis.sample_strings.size() < 10) {
+                analysis.sample_strings.push_back(current_string);
+            }
+        }
+    }
+    
+    analysis.total_printable_strings = strings.size();
+    
+    // Analyze content types
+    for (const auto& str : strings) {
+        std::string lower_str = str;
+        std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(), ::tolower);
+        
+        // Check for text file indicators
+        if (lower_str.find(".txt") != std::string::npos || 
+            lower_str.find(".log") != std::string::npos ||
+            lower_str.find(".md") != std::string::npos ||
+            str.find("The ") != std::string::npos ||
+            str.find("This ") != std::string::npos) {
+            analysis.contains_text_files = true;
+        }
+        
+        // Check for config file indicators
+        if (lower_str.find(".conf") != std::string::npos ||
+            lower_str.find(".cfg") != std::string::npos ||
+            lower_str.find(".ini") != std::string::npos ||
+            lower_str.find("config") != std::string::npos ||
+            str.find("=") != std::string::npos) {
+            analysis.contains_config_files = true;
+        }
+        
+        // Check for log entry indicators
+        if (lower_str.find("error") != std::string::npos ||
+            lower_str.find("warning") != std::string::npos ||
+            lower_str.find("info") != std::string::npos ||
+            lower_str.find("debug") != std::string::npos ||
+            str.find(":") != std::string::npos) {
+            analysis.contains_log_entries = true;
+        }
+    }
+    
+    return analysis;
+}
+
+bool JournalParser::isHumanReadableString(const char* str, size_t len) const {
+    if (!str || len < 3) return false;
+    
+    size_t printable_count = 0;
+    size_t alpha_count = 0;
+    
+    for (size_t i = 0; i < len; ++i) {
+        if (std::isprint(str[i])) {
+            printable_count++;
+            if (std::isalpha(str[i])) {
+                alpha_count++;
+            }
+        }
+    }
+    
+    // Must be at least 80% printable and 20% alphabetic
+    return (printable_count >= len * 0.8) && (alpha_count >= len * 0.2);
+}
+
+bool JournalParser::containsPotentiallyInterestingContent(const std::string& str) const {
+    if (str.length() < 8) return false;
+    
+    // Look for potentially interesting patterns
+    std::string lower_str = str;
+    std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(), ::tolower);
+    
+    // File extensions
+    const std::vector<std::string> interesting_extensions = {
+        ".txt", ".log", ".conf", ".cfg", ".ini", ".xml", ".json", 
+        ".sh", ".py", ".pl", ".js", ".html", ".css", ".sql"
+    };
+    
+    for (const auto& ext : interesting_extensions) {
+        if (lower_str.find(ext) != std::string::npos) return true;
+    }
+    
+    // Common readable content patterns
+    const std::vector<std::string> patterns = {
+        "password", "user", "admin", "config", "error", "warning", "info",
+        "http://", "https://", "ftp://", "email", "mail", "www.", ".com", ".org",
+        "root", "home", "tmp", "var", "usr", "etc", "bin", "sbin"
+    };
+    
+    for (const auto& pattern : patterns) {
+        if (lower_str.find(pattern) != std::string::npos) return true;
+    }
+    
+    // Check for sentence-like structures
+    if (str.find(". ") != std::string::npos || str.find("! ") != std::string::npos ||
+        str.find("? ") != std::string::npos) {
+        return true;
+    }
+    
+    return false;
 }

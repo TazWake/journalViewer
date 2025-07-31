@@ -131,6 +131,14 @@ struct ForensicAnalysis {
     bool high_activity_detected;       // Frequent transactions
     size_t filesystem_blocks_modified; // Unique fs blocks referenced
     
+    // String analysis results for data blocks
+    size_t data_blocks_with_strings;   // Data blocks containing readable strings
+    size_t total_extracted_strings;    // Total number of strings found
+    size_t text_file_blocks;           // Blocks containing text file content
+    size_t config_file_blocks;         // Blocks containing config file content
+    size_t log_file_blocks;            // Blocks containing log entries
+    std::vector<std::string> sample_extracted_strings; // Sample strings for analysis
+    
     ForensicAnalysis() : detected_mode(JournalMode::UNKNOWN), journal_type("Unknown"),
                         total_transactions(0), total_blocks_scanned(0), valid_journal_blocks(0),
                         sequence_range_start(0), sequence_range_end(0), descriptor_blocks(0),
@@ -138,7 +146,9 @@ struct ForensicAnalysis {
                         avg_descriptors_per_transaction(0), max_descriptors_per_transaction(0),
                         has_timestamps(false), transaction_gaps(0), rapid_transactions(0),
                         potential_data_recovery(false), metadata_only_mode(false),
-                        high_activity_detected(false), filesystem_blocks_modified(0) {}
+                        high_activity_detected(false), filesystem_blocks_modified(0),
+                        data_blocks_with_strings(0), total_extracted_strings(0),
+                        text_file_blocks(0), config_file_blocks(0), log_file_blocks(0) {}
 };
 
 // Change type for tracking modifications
@@ -289,6 +299,26 @@ private:
     void generateForensicSummary() const;
     std::string getJournalModeString(JournalMode mode) const;
     std::string generateRelativeTimestamp(uint32_t sequence_num, uint32_t base_sequence) const;
+    
+    // String analysis for data blocks
+    struct StringAnalysis {
+        size_t total_printable_strings;
+        size_t min_string_length;
+        size_t max_string_length;
+        size_t total_string_bytes;
+        std::vector<std::string> sample_strings;
+        bool contains_text_files;
+        bool contains_config_files;
+        bool contains_log_entries;
+        
+        StringAnalysis() : total_printable_strings(0), min_string_length(3), max_string_length(0),
+                          total_string_bytes(0), contains_text_files(false), 
+                          contains_config_files(false), contains_log_entries(false) {}
+    };
+    
+    StringAnalysis analyzeDataBlockStrings(const char* data, size_t size) const;
+    bool isHumanReadableString(const char* str, size_t len) const;
+    bool containsPotentiallyInterestingContent(const std::string& str) const;
     
     // Journal superblock parsing
     struct JournalSuperblock {
