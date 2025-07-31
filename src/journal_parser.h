@@ -22,7 +22,50 @@ struct JournalHeader {
     uint32_t sequence;     // Transaction sequence number
 };
 
-// Journal transaction record
+// EXT4 inode structure (128 bytes)
+struct EXT4Inode {
+    uint16_t mode;          // File type and permissions
+    uint16_t uid;           // User ID (lower 16 bits)
+    uint32_t size_lo;       // File size (lower 32 bits)
+    uint32_t atime;         // Access time
+    uint32_t ctime;         // Change time
+    uint32_t mtime;         // Modification time
+    uint32_t dtime;         // Deletion time
+    uint16_t gid;           // Group ID (lower 16 bits)
+    uint16_t links_count;   // Hard link count
+    uint32_t blocks_lo;     // Block count (lower 32 bits)
+    uint32_t flags;         // Inode flags
+    uint32_t osd1;          // OS dependent 1
+    uint32_t block[15];     // Block pointers/extents
+    uint32_t generation;    // File version
+    uint32_t file_acl_lo;   // Extended attributes (lower 32 bits)
+    uint32_t size_hi;       // File size (upper 32 bits)
+    uint32_t obso_faddr;    // Obsolete fragment address
+    uint16_t blocks_hi;     // Block count (upper 16 bits)
+    uint16_t file_acl_hi;   // Extended attributes (upper 16 bits)
+    uint16_t uid_hi;        // User ID (upper 16 bits)
+    uint16_t gid_hi;        // Group ID (upper 16 bits)
+    uint16_t checksum_lo;   // Inode checksum (lower 16 bits)
+    uint16_t reserved;      // Reserved
+    uint16_t extra_isize;   // Size of extra inode fields
+    uint16_t checksum_hi;   // Inode checksum (upper 16 bits)
+    uint32_t ctime_extra;   // Extra change time
+    uint32_t mtime_extra;   // Extra modification time
+    uint32_t atime_extra;   // Extra access time
+    uint32_t crtime;        // Creation time
+    uint32_t crtime_extra;  // Extra creation time
+};
+
+// Block content types
+enum class BlockContentType {
+    UNKNOWN,
+    INODE_TABLE,
+    DIRECTORY,
+    FILE_DATA,
+    METADATA
+};
+
+// Journal transaction record with Phase 1 enhancements
 struct JournalTransaction {
     std::string timestamp;          // ISO 8601 format
     uint32_t transaction_seq;       // Transaction sequence number
@@ -33,6 +76,12 @@ struct JournalTransaction {
     std::string file_path;         // File path (if recoverable)
     size_t data_size;              // Data block size
     std::string checksum;          // Block checksum (hex)
+    
+    // Phase 1 additions
+    std::string file_type;         // File type (regular_file, directory, symlink, etc.)
+    uint64_t file_size;            // File size from inode
+    uint32_t inode_number;         // Specific inode number
+    uint16_t link_count;           // Hard link count
 };
 
 // Descriptor block entry
@@ -56,6 +105,14 @@ private:
     std::string calculateChecksum(const char* data, size_t size);
     std::string formatTimestamp(uint64_t unix_timestamp);
     std::string blockTypeToString(JournalBlockType type);
+    
+    // Phase 1: Inode and block analysis
+    bool parseInodeBlock(const char* data, size_t size, std::vector<EXT4Inode>& inodes, std::vector<uint32_t>& inode_numbers);
+    BlockContentType identifyBlockType(const char* data, size_t size);
+    std::string getFileTypeString(uint16_t mode);
+    uint64_t getFullFileSize(const EXT4Inode& inode);
+    uint32_t getFullUID(const EXT4Inode& inode);
+    uint32_t getFullGID(const EXT4Inode& inode);
     
     // Journal superblock parsing
     struct JournalSuperblock {

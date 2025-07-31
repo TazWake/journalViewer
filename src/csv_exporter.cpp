@@ -4,7 +4,7 @@
 #include <algorithm>
 
 const std::string CSVExporter::CSV_HEADER = 
-    "timestamp,transaction_seq,block_type,fs_block_num,operation_type,affected_inode,file_path,data_size,checksum";
+    "timestamp,transaction_seq,block_type,fs_block_num,operation_type,affected_inode,file_path,data_size,checksum,file_type,file_size,inode_number,link_count";
 
 CSVExporter::CSVExporter() : exported_count(0) {
 }
@@ -122,7 +122,20 @@ std::string CSVExporter::formatCSVRow(const JournalTransaction& transaction) {
     ss << transaction.data_size << ",";
     
     // checksum
-    ss << escapeCSVField(transaction.checksum);
+    ss << escapeCSVField(transaction.checksum) << ",";
+    
+    // Phase 1 fields
+    // file_type
+    ss << escapeCSVField(transaction.file_type) << ",";
+    
+    // file_size
+    ss << transaction.file_size << ",";
+    
+    // inode_number
+    ss << transaction.inode_number << ",";
+    
+    // link_count
+    ss << transaction.link_count;
     
     return ss.str();
 }

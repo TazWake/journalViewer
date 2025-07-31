@@ -6,6 +6,18 @@
 #include <ctime>
 #include <algorithm>
 
+// EXT4 constants
+static const uint16_t EXT4_FT_REG_FILE = 0x8000;   // Regular file
+static const uint16_t EXT4_FT_DIR = 0x4000;        // Directory
+static const uint16_t EXT4_FT_CHRDEV = 0x2000;     // Character device
+static const uint16_t EXT4_FT_BLKDEV = 0x6000;     // Block device
+static const uint16_t EXT4_FT_FIFO = 0x1000;       // FIFO
+static const uint16_t EXT4_FT_SOCK = 0xC000;       // Socket
+static const uint16_t EXT4_FT_SYMLINK = 0xA000;    // Symbolic link
+
+static const size_t EXT4_INODE_SIZE = 128;         // Standard EXT4 inode size
+static const uint32_t EXT4_VALID_INUM = 11;        // First valid inode number
+
 JournalParser::JournalParser() {
 }
 
@@ -115,6 +127,12 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.data_size = current_descriptors.size() * sizeof(DescriptorEntry);
                 trans.checksum = calculateChecksum(block_buffer, BLOCK_SIZE);
                 
+                // Initialize Phase 1 fields
+                trans.file_type = "transaction";
+                trans.file_size = 0;
+                trans.inode_number = 0;
+                trans.link_count = 0;
+                
                 transactions.push_back(trans);
                 break;
             }
@@ -136,22 +154,104 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                     trans.data_size = 0;
                     trans.checksum = calculateChecksum(block_buffer, BLOCK_SIZE);
                     
+                    // Initialize Phase 1 fields
+                    trans.file_type = "transaction";
+                    trans.file_size = 0;
+                    trans.inode_number = 0;
+                    trans.link_count = 0;
+                    
                     transactions.push_back(trans);
                     
-                    // Process data blocks for this transaction
+                    // Process data blocks for this transaction with Phase 1 analysis
+                    size_t data_block_index = 0;
                     for (const auto& desc : current_descriptors) {
+                        // Calculate the offset of this data block in the journal
+                        long data_block_offset = offset + BLOCK_SIZE * (1 + data_block_index);
+                        
+                        // Read the actual data block from journal
+                        char data_block_buffer[BLOCK_SIZE];
+                        bool data_read_success = false;
+                        if (data_block_offset < journal_offset + journal_size) {
+                            data_read_success = image_handler.readBytes(data_block_offset, data_block_buffer, BLOCK_SIZE);
+                        }
+                        
                         JournalTransaction data_trans;
                         data_trans.timestamp = trans.timestamp;
                         data_trans.transaction_seq = header.sequence;
                         data_trans.block_type = "data";
                         data_trans.fs_block_num = desc.fs_block_num;
-                        data_trans.operation_type = "filesystem_update";
-                        data_trans.affected_inode = 0; // Would need filesystem analysis to determine
-                        data_trans.file_path = "";
                         data_trans.data_size = BLOCK_SIZE;
-                        data_trans.checksum = ""; // Would need actual data block to calculate
+                        
+                        // Initialize Phase 1 fields with defaults
+                        data_trans.file_type = "unknown";
+                        data_trans.file_size = 0;
+                        data_trans.inode_number = 0;
+                        data_trans.link_count = 0;
+                        data_trans.affected_inode = 0;
+                        data_trans.file_path = "";
+                        
+                        if (data_read_success) {
+                            data_trans.checksum = calculateChecksum(data_block_buffer, BLOCK_SIZE);
+                            
+                            // Analyze block content with Phase 1 functionality
+                            BlockContentType content_type = identifyBlockType(data_block_buffer, BLOCK_SIZE);
+                            
+                            switch (content_type) {
+                                case BlockContentType::INODE_TABLE: {
+                                    data_trans.operation_type = "inode_update";
+                                    
+                                    // Parse inode information
+                                    std::vector<EXT4Inode> inodes;
+                                    std::vector<uint32_t> inode_numbers;
+                                    if (parseInodeBlock(data_block_buffer, BLOCK_SIZE, inodes, inode_numbers)) {
+                                        if (!inodes.empty()) {
+                                            // Use data from first valid inode found
+                                            const EXT4Inode& first_inode = inodes[0];
+                                            data_trans.file_type = getFileTypeString(first_inode.mode);
+                                            data_trans.file_size = getFullFileSize(first_inode);
+                                            data_trans.inode_number = inode_numbers[0];
+                                            data_trans.link_count = first_inode.links_count;
+                                            data_trans.affected_inode = inode_numbers[0];
+                                            
+                                            // If multiple inodes, indicate this in operation type
+                                            if (inodes.size() > 1) {
+                                                data_trans.operation_type = "inode_batch_update";
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                                
+                                case BlockContentType::DIRECTORY: {
+                                    data_trans.operation_type = "directory_update";
+                                    data_trans.file_type = "directory";
+                                    break;
+                                }
+                                
+                                case BlockContentType::METADATA: {
+                                    data_trans.operation_type = "metadata_update";
+                                    data_trans.file_type = "metadata";
+                                    break;
+                                }
+                                
+                                case BlockContentType::FILE_DATA: {
+                                    data_trans.operation_type = "file_data_update";
+                                    data_trans.file_type = "file_data";
+                                    break;
+                                }
+                                
+                                default: {
+                                    data_trans.operation_type = "filesystem_update";
+                                    break;
+                                }
+                            }
+                        } else {
+                            data_trans.operation_type = "filesystem_update";
+                            data_trans.checksum = "";
+                        }
                         
                         transactions.push_back(data_trans);
+                        data_block_index++;
                     }
                     
                     current_descriptors.clear();
@@ -171,6 +271,12 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.data_size = BLOCK_SIZE - JOURNAL_HEADER_SIZE;
                 trans.checksum = calculateChecksum(block_buffer, BLOCK_SIZE);
                 
+                // Initialize Phase 1 fields
+                trans.file_type = "revocation";
+                trans.file_size = 0;
+                trans.inode_number = 0;
+                trans.link_count = 0;
+                
                 transactions.push_back(trans);
                 break;
             }
@@ -187,6 +293,12 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.file_path = "";
                 trans.data_size = BLOCK_SIZE - JOURNAL_HEADER_SIZE;
                 trans.checksum = calculateChecksum(block_buffer, BLOCK_SIZE);
+                
+                // Initialize Phase 1 fields
+                trans.file_type = "superblock";
+                trans.file_size = 0;
+                trans.inode_number = 0;
+                trans.link_count = 0;
                 
                 transactions.push_back(trans);
                 break;
@@ -354,4 +466,130 @@ size_t JournalParser::getEstimatedTransactionCount(ImageHandler& image_handler) 
     
     // Rough estimate: assume average transaction is 10 blocks
     return static_cast<size_t>(journal_size / (BLOCK_SIZE * 10));
+}
+
+// Phase 1 implementation: Parse inode blocks
+bool JournalParser::parseInodeBlock(const char* data, size_t size, 
+                                  std::vector<EXT4Inode>& inodes, 
+                                  std::vector<uint32_t>& inode_numbers) {
+    if (!data || size < EXT4_INODE_SIZE) {
+        return false;
+    }
+    
+    // Calculate how many inodes can fit in this block
+    size_t max_inodes = size / EXT4_INODE_SIZE;
+    
+    for (size_t i = 0; i < max_inodes; ++i) {
+        const char* inode_data = data + (i * EXT4_INODE_SIZE);
+        EXT4Inode inode = {};
+        
+        // Parse inode structure (assuming little-endian host)
+        memcpy(&inode.mode, inode_data + 0, 2);
+        memcpy(&inode.uid, inode_data + 2, 2);
+        memcpy(&inode.size_lo, inode_data + 4, 4);
+        memcpy(&inode.atime, inode_data + 8, 4);
+        memcpy(&inode.ctime, inode_data + 12, 4);
+        memcpy(&inode.mtime, inode_data + 16, 4);
+        memcpy(&inode.dtime, inode_data + 20, 4);
+        memcpy(&inode.gid, inode_data + 24, 2);
+        memcpy(&inode.links_count, inode_data + 26, 2);
+        memcpy(&inode.blocks_lo, inode_data + 28, 4);
+        memcpy(&inode.flags, inode_data + 32, 4);
+        
+        // Copy block pointers
+        memcpy(inode.block, inode_data + 40, 60);
+        
+        // Parse remaining fields
+        memcpy(&inode.generation, inode_data + 100, 4);
+        memcpy(&inode.file_acl_lo, inode_data + 104, 4);
+        memcpy(&inode.size_hi, inode_data + 108, 4);
+        
+        // Validate inode - check if it looks valid
+        if (inode.mode != 0 && inode.links_count > 0 && inode.links_count < 65536) {
+            // This looks like a valid inode
+            inodes.push_back(inode);
+            // Calculate inode number (this is simplified - real calculation needs block group info)
+            inode_numbers.push_back(static_cast<uint32_t>(i + 1));
+        }
+    }
+    
+    return !inodes.empty();
+}
+
+// Identify what type of content a block contains
+BlockContentType JournalParser::identifyBlockType(const char* data, size_t size) {
+    if (!data || size < 16) {
+        return BlockContentType::UNKNOWN;
+    }
+    
+    // Check for inode table pattern
+    // Look for multiple valid inode structures
+    std::vector<EXT4Inode> temp_inodes;
+    std::vector<uint32_t> temp_numbers;
+    if (parseInodeBlock(data, size, temp_inodes, temp_numbers) && temp_inodes.size() >= 2) {
+        return BlockContentType::INODE_TABLE;
+    }
+    
+    // Check for directory entry pattern
+    // Directory entries start with inode number (4 bytes) followed by record length
+    const uint32_t* inode_num = reinterpret_cast<const uint32_t*>(data);
+    const uint16_t* rec_len = reinterpret_cast<const uint16_t*>(data + 4);
+    
+    if (*inode_num > 0 && *inode_num < 0xFFFFFF && *rec_len >= 8 && *rec_len <= size) {
+        // Additional check: name length should be reasonable
+        const uint8_t* name_len = reinterpret_cast<const uint8_t*>(data + 6);
+        if (*name_len > 0 && *name_len < 256) {
+            return BlockContentType::DIRECTORY;
+        }
+    }
+    
+    // Check for metadata patterns (simplified)
+    // Look for repeated patterns that might indicate metadata structures
+    uint32_t pattern_count = 0;
+    for (size_t i = 0; i < size - 4; i += 4) {
+        const uint32_t* value = reinterpret_cast<const uint32_t*>(data + i);
+        if (*value != 0 && *value < 0xFFFFFF) {
+            pattern_count++;
+        }
+    }
+    
+    if (pattern_count > size / 16) {  // If more than 1/4 of 4-byte values look like block numbers
+        return BlockContentType::METADATA;
+    }
+    
+    return BlockContentType::FILE_DATA;
+}
+
+// Convert inode mode to readable file type string
+std::string JournalParser::getFileTypeString(uint16_t mode) {
+    uint16_t file_type = mode & 0xF000;  // Extract file type bits
+    
+    switch (file_type) {
+        case EXT4_FT_REG_FILE: return "regular_file";
+        case EXT4_FT_DIR: return "directory";
+        case EXT4_FT_SYMLINK: return "symlink";
+        case EXT4_FT_CHRDEV: return "char_device";
+        case EXT4_FT_BLKDEV: return "block_device";
+        case EXT4_FT_FIFO: return "fifo";
+        case EXT4_FT_SOCK: return "socket";
+        default: return "unknown";
+    }
+}
+
+// Get full 64-bit file size from inode
+uint64_t JournalParser::getFullFileSize(const EXT4Inode& inode) {
+    return static_cast<uint64_t>(inode.size_lo) | 
+           (static_cast<uint64_t>(inode.size_hi) << 32);
+}
+
+// Get full 32-bit UID from inode
+uint32_t JournalParser::getFullUID(const EXT4Inode& inode) {
+    return static_cast<uint32_t>(inode.uid) | 
+           (static_cast<uint32_t>(inode.uid_hi) << 16);
+}
+
+// Get full 32-bit GID from inode
+uint32_t JournalParser::getFullGID(const EXT4Inode& inode) {
+    return static_cast<uint32_t>(inode.gid) | 
+           (static_cast<uint32_t>(inode.gid_hi) << 16);
 }
