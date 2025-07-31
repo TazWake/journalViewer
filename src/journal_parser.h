@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
 #include "image_handler.h"
 
 // JBD2 block types
@@ -65,6 +66,44 @@ enum class BlockContentType {
     METADATA
 };
 
+// EXT4 directory entry structure
+struct EXT4DirectoryEntry {
+    uint32_t inode;         // Inode number
+    uint16_t rec_len;       // Record length
+    uint8_t name_len;       // Name length
+    uint8_t file_type;      // File type
+    std::string name;       // Filename (variable length)
+};
+
+// File operation types for Phase 2
+enum class FileOperationType {
+    UNKNOWN,
+    FILE_CREATED,
+    FILE_DELETED,
+    FILE_RENAMED,
+    FILE_MODIFIED,
+    DIRECTORY_CREATED,
+    DIRECTORY_DELETED,
+    HARD_LINK_CREATED,
+    HARD_LINK_REMOVED,
+    PERMISSIONS_CHANGED,
+    OWNERSHIP_CHANGED
+};
+
+// Change type for tracking modifications
+enum class ChangeType {
+    UNKNOWN,
+    NEW_ENTRY,
+    REMOVED_ENTRY,
+    MODIFIED_ENTRY,
+    NAME_CHANGE,
+    INODE_CHANGE,
+    SIZE_CHANGE,
+    LINK_COUNT_CHANGE,
+    PERMISSION_CHANGE,
+    OWNERSHIP_CHANGE
+};
+
 // Journal transaction record with Phase 1 enhancements
 struct JournalTransaction {
     std::string timestamp;          // ISO 8601 format
@@ -82,12 +121,70 @@ struct JournalTransaction {
     uint64_t file_size;            // File size from inode
     uint32_t inode_number;         // Specific inode number
     uint16_t link_count;           // Hard link count
+    
+    // Phase 2 additions
+    std::string filename;          // Filename from directory entry
+    uint32_t parent_dir_inode;     // Parent directory inode number
+    std::string change_type;       // Type of change (new_entry, removed_entry, etc.)
+    
+    // Phase 3 additions
+    std::string full_path;         // Complete file path from root
 };
 
 // Descriptor block entry
 struct DescriptorEntry {
     uint64_t fs_block_num;
     uint32_t flags;
+};
+
+// Directory tree node for Phase 3
+struct DirectoryNode {
+    uint32_t inode_number;
+    uint32_t parent_inode;
+    std::string name;
+    std::string full_path;
+    bool is_directory;
+    std::vector<uint32_t> children;
+    
+    DirectoryNode() : inode_number(0), parent_inode(0), name(""), full_path(""), is_directory(false) {}
+};
+
+// Phase 3: Directory tree builder and path resolver
+class DirectoryTreeBuilder {
+private:
+    std::unordered_map<uint32_t, DirectoryNode> nodes;           // inode -> node mapping
+    std::unordered_map<uint32_t, std::string> path_cache;        // inode -> cached full path
+    std::unordered_map<std::string, uint32_t> name_to_inode;     // name -> inode mapping
+    uint32_t root_inode;
+    
+    static const uint32_t EXT4_ROOT_INODE = 2;
+    static const uint32_t EXT4_LOST_FOUND_INODE = 11;
+    static const size_t MAX_PATH_DEPTH = 256;
+    
+public:
+    DirectoryTreeBuilder();
+    ~DirectoryTreeBuilder();
+    
+    // Core functionality
+    void addDirectoryEntry(uint32_t dir_inode, const EXT4DirectoryEntry& entry);
+    void addInodeInfo(uint32_t inode, const EXT4Inode& inode_data);
+    std::string buildFullPath(uint32_t inode);
+    void clearCache();
+    
+    // Path resolution
+    std::string resolvePath(uint32_t inode);
+    std::string getParentPath(uint32_t inode);
+    bool isValidPath(const std::string& path);
+    
+    // Tree management
+    void updateNode(uint32_t inode, uint32_t parent_inode, const std::string& name, bool is_dir);
+    bool hasNode(uint32_t inode) const;
+    const DirectoryNode* getNode(uint32_t inode) const;
+    
+    // Statistics and debugging
+    size_t getNodeCount() const { return nodes.size(); }
+    size_t getCacheSize() const { return path_cache.size(); }
+    void printTree(uint32_t root_inode = EXT4_ROOT_INODE, int depth = 0) const;
 };
 
 class JournalParser {
@@ -113,6 +210,25 @@ private:
     uint64_t getFullFileSize(const EXT4Inode& inode);
     uint32_t getFullUID(const EXT4Inode& inode);
     uint32_t getFullGID(const EXT4Inode& inode);
+    
+    // Phase 2: Directory operations detection
+    bool parseDirectoryBlock(const char* data, size_t size, std::vector<EXT4DirectoryEntry>& entries);
+    FileOperationType inferFileOperation(const std::vector<EXT4DirectoryEntry>& entries, 
+                                       const std::vector<EXT4Inode>& inodes,
+                                       uint32_t transaction_seq);
+    std::string getOperationTypeString(FileOperationType op_type);
+    std::string getChangeTypeString(ChangeType change_type);
+    ChangeType analyzeDirectoryChanges(const std::vector<EXT4DirectoryEntry>& entries);
+    
+    // Phase 3: Path resolution and directory tree management
+    DirectoryTreeBuilder directory_tree;
+    std::string buildFullPath(uint32_t inode);
+    std::string resolveInodePath(uint32_t inode);
+    void updateDirectoryTree(const std::vector<EXT4DirectoryEntry>& entries, uint32_t parent_inode);
+    void updateDirectoryTreeFromInodes(const std::vector<EXT4Inode>& inodes, const std::vector<uint32_t>& inode_numbers);
+    std::string handleSpecialPaths(uint32_t inode, const std::string& name);
+    bool isRootDirectory(uint32_t inode);
+    bool isLostAndFound(uint32_t inode);
     
     // Journal superblock parsing
     struct JournalSuperblock {

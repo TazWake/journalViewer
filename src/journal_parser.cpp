@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <unordered_set>
 
 // EXT4 constants
 static const uint16_t EXT4_FT_REG_FILE = 0x8000;   // Regular file
@@ -17,6 +18,16 @@ static const uint16_t EXT4_FT_SYMLINK = 0xA000;    // Symbolic link
 
 static const size_t EXT4_INODE_SIZE = 128;         // Standard EXT4 inode size
 static const uint32_t EXT4_VALID_INUM = 11;        // First valid inode number
+
+// EXT4 directory entry file types
+static const uint8_t EXT4_FT_UNKNOWN = 0;          // Unknown file type
+static const uint8_t EXT4_FT_REG_FILE_DIR = 1;     // Regular file (in dir entry)
+static const uint8_t EXT4_FT_DIR_DIR = 2;          // Directory (in dir entry)
+static const uint8_t EXT4_FT_CHRDEV_DIR = 3;       // Character device (in dir entry)
+static const uint8_t EXT4_FT_BLKDEV_DIR = 4;       // Block device (in dir entry)
+static const uint8_t EXT4_FT_FIFO_DIR = 5;         // FIFO (in dir entry)
+static const uint8_t EXT4_FT_SOCK_DIR = 6;         // Socket (in dir entry)
+static const uint8_t EXT4_FT_SYMLINK_DIR = 7;      // Symbolic link (in dir entry)
 
 JournalParser::JournalParser() {
 }
@@ -133,6 +144,14 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.inode_number = 0;
                 trans.link_count = 0;
                 
+                // Initialize Phase 2 fields
+                trans.filename = "";
+                trans.parent_dir_inode = 0;
+                trans.change_type = "transaction_start";
+                
+                // Initialize Phase 3 fields
+                trans.full_path = "";
+                
                 transactions.push_back(trans);
                 break;
             }
@@ -159,6 +178,14 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                     trans.file_size = 0;
                     trans.inode_number = 0;
                     trans.link_count = 0;
+                    
+                    // Initialize Phase 2 fields
+                    trans.filename = "";
+                    trans.parent_dir_inode = 0;
+                    trans.change_type = "transaction_end";
+                    
+                    // Initialize Phase 3 fields
+                    trans.full_path = "";
                     
                     transactions.push_back(trans);
                     
@@ -190,6 +217,14 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                         data_trans.affected_inode = 0;
                         data_trans.file_path = "";
                         
+                        // Initialize Phase 2 fields with defaults
+                        data_trans.filename = "";
+                        data_trans.parent_dir_inode = 0;
+                        data_trans.change_type = "unknown";
+                        
+                        // Initialize Phase 3 fields with defaults
+                        data_trans.full_path = "";
+                        
                         if (data_read_success) {
                             data_trans.checksum = calculateChecksum(data_block_buffer, BLOCK_SIZE);
                             
@@ -205,6 +240,9 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                                     std::vector<uint32_t> inode_numbers;
                                     if (parseInodeBlock(data_block_buffer, BLOCK_SIZE, inodes, inode_numbers)) {
                                         if (!inodes.empty()) {
+                                            // Phase 3: Update directory tree with inode information
+                                            updateDirectoryTreeFromInodes(inodes, inode_numbers);
+                                            
                                             // Use data from first valid inode found
                                             const EXT4Inode& first_inode = inodes[0];
                                             data_trans.file_type = getFileTypeString(first_inode.mode);
@@ -212,6 +250,9 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                                             data_trans.inode_number = inode_numbers[0];
                                             data_trans.link_count = first_inode.links_count;
                                             data_trans.affected_inode = inode_numbers[0];
+                                            
+                                            // Phase 3: Build full path for inode
+                                            data_trans.full_path = buildFullPath(inode_numbers[0]);
                                             
                                             // If multiple inodes, indicate this in operation type
                                             if (inodes.size() > 1) {
@@ -225,23 +266,72 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                                 case BlockContentType::DIRECTORY: {
                                     data_trans.operation_type = "directory_update";
                                     data_trans.file_type = "directory";
+                                    
+                                    // Phase 2: Parse directory entries
+                                    std::vector<EXT4DirectoryEntry> dir_entries;
+                                    if (parseDirectoryBlock(data_block_buffer, BLOCK_SIZE, dir_entries)) {
+                                        if (!dir_entries.empty()) {
+                                            // Phase 3: Update directory tree with entries
+                                            uint32_t parent_inode = desc.fs_block_num; // Approximate parent inode
+                                            updateDirectoryTree(dir_entries, parent_inode);
+                                            
+                                            // Use information from first valid directory entry
+                                            const EXT4DirectoryEntry& first_entry = dir_entries[0];
+                                            
+                                            // Set Phase 2 fields
+                                            data_trans.filename = first_entry.name;
+                                            data_trans.parent_dir_inode = parent_inode;
+                                            
+                                            // Determine operation type based on directory analysis
+                                            std::vector<EXT4Inode> empty_inodes; // Will be enhanced later
+                                            FileOperationType op_type = inferFileOperation(dir_entries, empty_inodes, header.sequence);
+                                            data_trans.operation_type = getOperationTypeString(op_type);
+                                            
+                                            // Analyze change type
+                                            ChangeType change_type = analyzeDirectoryChanges(dir_entries);
+                                            data_trans.change_type = getChangeTypeString(change_type);
+                                            
+                                            // Phase 3: Build full path for first entry
+                                            data_trans.full_path = buildFullPath(first_entry.inode);
+                                            
+                                            // If multiple entries, create additional transactions
+                                            for (size_t i = 1; i < dir_entries.size(); ++i) {
+                                                JournalTransaction additional_trans = data_trans;
+                                                additional_trans.filename = dir_entries[i].name;
+                                                additional_trans.affected_inode = dir_entries[i].inode;
+                                                additional_trans.inode_number = dir_entries[i].inode;
+                                                additional_trans.full_path = buildFullPath(dir_entries[i].inode);
+                                                transactions.push_back(additional_trans);
+                                            }
+                                            
+                                            // Update main transaction with first entry info
+                                            data_trans.affected_inode = first_entry.inode;
+                                            data_trans.inode_number = first_entry.inode;
+                                        }
+                                    }
                                     break;
                                 }
                                 
                                 case BlockContentType::METADATA: {
                                     data_trans.operation_type = "metadata_update";
                                     data_trans.file_type = "metadata";
+                                    data_trans.change_type = "metadata_change";
+                                    data_trans.full_path = "/metadata_block_" + std::to_string(desc.fs_block_num);
                                     break;
                                 }
                                 
                                 case BlockContentType::FILE_DATA: {
                                     data_trans.operation_type = "file_data_update";
                                     data_trans.file_type = "file_data";
+                                    data_trans.change_type = "data_change";
+                                    data_trans.full_path = "/data_block_" + std::to_string(desc.fs_block_num);
                                     break;
                                 }
                                 
                                 default: {
                                     data_trans.operation_type = "filesystem_update";
+                                    data_trans.change_type = "unknown";
+                                    data_trans.full_path = "/unknown_block_" + std::to_string(desc.fs_block_num);
                                     break;
                                 }
                             }
@@ -277,6 +367,14 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.inode_number = 0;
                 trans.link_count = 0;
                 
+                // Initialize Phase 2 fields
+                trans.filename = "";
+                trans.parent_dir_inode = 0;
+                trans.change_type = "block_revocation";
+                
+                // Initialize Phase 3 fields
+                trans.full_path = "";
+                
                 transactions.push_back(trans);
                 break;
             }
@@ -299,6 +397,14 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 trans.file_size = 0;
                 trans.inode_number = 0;
                 trans.link_count = 0;
+                
+                // Initialize Phase 2 fields
+                trans.filename = "";
+                trans.parent_dir_inode = 0;
+                trans.change_type = "journal_init";
+                
+                // Initialize Phase 3 fields
+                trans.full_path = "/";
                 
                 transactions.push_back(trans);
                 break;
@@ -592,4 +698,410 @@ uint32_t JournalParser::getFullUID(const EXT4Inode& inode) {
 uint32_t JournalParser::getFullGID(const EXT4Inode& inode) {
     return static_cast<uint32_t>(inode.gid) | 
            (static_cast<uint32_t>(inode.gid_hi) << 16);
+}
+
+// Phase 2 implementation: Parse directory blocks
+bool JournalParser::parseDirectoryBlock(const char* data, size_t size, 
+                                       std::vector<EXT4DirectoryEntry>& entries) {
+    if (!data || size < 8) {
+        return false;
+    }
+    
+    size_t offset = 0;
+    entries.clear();
+    
+    while (offset < size) {
+        // Need at least 8 bytes for directory entry header
+        if (offset + 8 > size) {
+            break;
+        }
+        
+        EXT4DirectoryEntry entry = {};
+        
+        // Parse directory entry fields
+        memcpy(&entry.inode, data + offset, 4);
+        memcpy(&entry.rec_len, data + offset + 4, 2);
+        memcpy(&entry.name_len, data + offset + 6, 1);
+        memcpy(&entry.file_type, data + offset + 7, 1);
+        
+        // Validate entry
+        if (entry.rec_len == 0 || entry.rec_len > size - offset) {
+            break; // Invalid record length
+        }
+        
+        if (entry.name_len > entry.rec_len - 8) {
+            break; // Name length exceeds available space
+        }
+        
+        // Extract filename if present
+        if (entry.name_len > 0 && offset + 8 + entry.name_len <= size) {
+            entry.name = std::string(data + offset + 8, entry.name_len);
+            
+            // Validate filename contains printable characters
+            bool valid_name = true;
+            for (char c : entry.name) {
+                if (c < 0x20 || c > 0x7E) {
+                    if (c != 0) { // Allow null termination
+                        valid_name = false;
+                        break;
+                    }
+                }
+            }
+            
+            if (!valid_name) {
+                entry.name = "<binary_name>";
+            }
+        }
+        
+        // Only add entries that look valid
+        if (entry.inode > 0 && entry.inode < 0xFFFFFFFF && 
+            entry.name_len < 256 && entry.rec_len >= 8) {
+            entries.push_back(entry);
+        }
+        
+        offset += entry.rec_len;
+        
+        // Safety check to prevent infinite loops
+        if (entry.rec_len < 8) {
+            break;
+        }
+    }
+    
+    return !entries.empty();
+}
+
+// Infer file operations from directory and inode analysis
+FileOperationType JournalParser::inferFileOperation(const std::vector<EXT4DirectoryEntry>& entries,
+                                                   const std::vector<EXT4Inode>& inodes,
+                                                   uint32_t transaction_seq) {
+    // This is a simplified heuristic-based approach
+    // Real implementation would compare with previous transaction states
+    
+    if (entries.empty() && inodes.empty()) {
+        return FileOperationType::UNKNOWN;
+    }
+    
+    // Analyze directory entries for creation/deletion patterns
+    if (!entries.empty()) {
+        // Look for special patterns that indicate operations
+        for (const auto& entry : entries) {
+            // New entries with recent inodes likely indicate file creation
+            if (entry.inode > 0 && entry.name != "." && entry.name != "..") {
+                // Check if this looks like a new file/directory based on entry type
+                switch (entry.file_type) {
+                    case EXT4_FT_REG_FILE_DIR:
+                        return FileOperationType::FILE_CREATED;
+                    case EXT4_FT_DIR_DIR:
+                        return FileOperationType::DIRECTORY_CREATED;
+                    case EXT4_FT_SYMLINK_DIR:
+                        return FileOperationType::FILE_CREATED; // Symlink creation
+                    default:
+                        return FileOperationType::FILE_CREATED;
+                }
+            }
+        }
+    }
+    
+    // Analyze inode changes
+    if (!inodes.empty()) {
+        for (const auto& inode : inodes) {
+            // Check link count changes
+            if (inode.links_count == 0) {
+                return FileOperationType::FILE_DELETED;
+            } else if (inode.links_count > 1) {
+                return FileOperationType::HARD_LINK_CREATED;
+            }
+            
+            // Check for recent modifications (simplified)
+            if (inode.mtime > 0 || inode.ctime > 0) {
+                return FileOperationType::FILE_MODIFIED;
+            }
+        }
+    }
+    
+    return FileOperationType::UNKNOWN;
+}
+
+// Convert operation type to string
+std::string JournalParser::getOperationTypeString(FileOperationType op_type) {
+    switch (op_type) {
+        case FileOperationType::FILE_CREATED: return "file_created";
+        case FileOperationType::FILE_DELETED: return "file_deleted";
+        case FileOperationType::FILE_RENAMED: return "file_renamed";
+        case FileOperationType::FILE_MODIFIED: return "file_modified";
+        case FileOperationType::DIRECTORY_CREATED: return "directory_created";
+        case FileOperationType::DIRECTORY_DELETED: return "directory_deleted";
+        case FileOperationType::HARD_LINK_CREATED: return "hard_link_created";
+        case FileOperationType::HARD_LINK_REMOVED: return "hard_link_removed";
+        case FileOperationType::PERMISSIONS_CHANGED: return "permissions_changed";
+        case FileOperationType::OWNERSHIP_CHANGED: return "ownership_changed";
+        default: return "unknown";
+    }
+}
+
+// Convert change type to string
+std::string JournalParser::getChangeTypeString(ChangeType change_type) {
+    switch (change_type) {
+        case ChangeType::NEW_ENTRY: return "new_entry";
+        case ChangeType::REMOVED_ENTRY: return "removed_entry";
+        case ChangeType::MODIFIED_ENTRY: return "modified_entry";
+        case ChangeType::NAME_CHANGE: return "name_change";
+        case ChangeType::INODE_CHANGE: return "inode_change";
+        case ChangeType::SIZE_CHANGE: return "size_change";
+        case ChangeType::LINK_COUNT_CHANGE: return "link_count_change";
+        case ChangeType::PERMISSION_CHANGE: return "permission_change";
+        case ChangeType::OWNERSHIP_CHANGE: return "ownership_change";
+        default: return "unknown";
+    }
+}
+
+// Analyze directory changes to determine change type
+ChangeType JournalParser::analyzeDirectoryChanges(const std::vector<EXT4DirectoryEntry>& entries) {
+    if (entries.empty()) {
+        return ChangeType::UNKNOWN;
+    }
+    
+    // This is simplified - real implementation would compare before/after states
+    // For now, assume new entries indicate new files
+    for (const auto& entry : entries) {
+        if (entry.inode > 0 && entry.name != "." && entry.name != "..") {
+            // Look for patterns that indicate different types of changes
+            if (entry.name.find("~") != std::string::npos || 
+                entry.name.find(".tmp") != std::string::npos) {
+                return ChangeType::MODIFIED_ENTRY;
+            }
+            return ChangeType::NEW_ENTRY;
+        }
+    }
+    
+    return ChangeType::UNKNOWN;
+}
+
+// Phase 3 Implementation: DirectoryTreeBuilder class methods
+
+DirectoryTreeBuilder::DirectoryTreeBuilder() : root_inode(EXT4_ROOT_INODE) {
+    // Initialize root directory node
+    DirectoryNode root_node;
+    root_node.inode_number = EXT4_ROOT_INODE;
+    root_node.parent_inode = EXT4_ROOT_INODE; // Root is its own parent
+    root_node.name = "/";
+    root_node.full_path = "/";
+    root_node.is_directory = true;
+    nodes[EXT4_ROOT_INODE] = root_node;
+    path_cache[EXT4_ROOT_INODE] = "/";
+}
+
+DirectoryTreeBuilder::~DirectoryTreeBuilder() {
+    nodes.clear();
+    path_cache.clear();
+    name_to_inode.clear();
+}
+
+void DirectoryTreeBuilder::addDirectoryEntry(uint32_t dir_inode, const EXT4DirectoryEntry& entry) {
+    if (entry.inode == 0 || entry.name.empty()) {
+        return;
+    }
+    
+    // Skip self and parent references
+    if (entry.name == "." || entry.name == "..") {
+        return;
+    }
+    
+    // Update or create node
+    bool is_dir = (entry.file_type == EXT4_FT_DIR_DIR);
+    updateNode(entry.inode, dir_inode, entry.name, is_dir);
+    
+    // Add to parent's children list
+    auto parent_it = nodes.find(dir_inode);
+    if (parent_it != nodes.end()) {
+        auto& children = parent_it->second.children;
+        if (std::find(children.begin(), children.end(), entry.inode) == children.end()) {
+            children.push_back(entry.inode);
+        }
+    }
+    
+    // Clear cached paths since tree structure changed
+    path_cache.clear();
+}
+
+void DirectoryTreeBuilder::addInodeInfo(uint32_t inode, const EXT4Inode& inode_data) {
+    auto it = nodes.find(inode);
+    if (it != nodes.end()) {
+        // Update existing node with inode information
+        it->second.is_directory = ((inode_data.mode & EXT4_FT_DIR) == EXT4_FT_DIR);
+    }
+}
+
+void DirectoryTreeBuilder::updateNode(uint32_t inode, uint32_t parent_inode, const std::string& name, bool is_dir) {
+    DirectoryNode& node = nodes[inode];
+    node.inode_number = inode;
+    node.parent_inode = parent_inode;
+    node.name = name;
+    node.is_directory = is_dir;
+    node.full_path = ""; // Will be computed on demand
+    
+    // Update reverse lookup
+    std::string lookup_key = std::to_string(parent_inode) + "/" + name;
+    name_to_inode[lookup_key] = inode;
+}
+
+std::string DirectoryTreeBuilder::buildFullPath(uint32_t inode) {
+    // Check cache first
+    auto cache_it = path_cache.find(inode);
+    if (cache_it != path_cache.end()) {
+        return cache_it->second;
+    }
+    
+    // Handle special cases
+    if (inode == EXT4_ROOT_INODE) {
+        path_cache[inode] = "/";
+        return "/";
+    }
+    
+    if (inode == EXT4_LOST_FOUND_INODE) {
+        path_cache[inode] = "/lost+found";
+        return "/lost+found";
+    }
+    
+    // Find the node
+    auto it = nodes.find(inode);
+    if (it == nodes.end()) {
+        std::string unknown_path = "/unknown_inode_" + std::to_string(inode);
+        path_cache[inode] = unknown_path;
+        return unknown_path;
+    }
+    
+    const DirectoryNode& node = it->second;
+    
+    // Prevent infinite recursion
+    static std::unordered_set<uint32_t> visiting;
+    if (visiting.find(inode) != visiting.end()) {
+        std::string cycle_path = "/cycle_detected_" + std::to_string(inode);
+        path_cache[inode] = cycle_path;
+        return cycle_path;
+    }
+    
+    visiting.insert(inode);
+    
+    // Recursively build parent path
+    std::string parent_path;
+    if (node.parent_inode == inode) {
+        // This node is its own parent (shouldn't happen except for root)
+        parent_path = "";
+    } else if (node.parent_inode == EXT4_ROOT_INODE) {
+        parent_path = "";
+    } else {
+        parent_path = buildFullPath(node.parent_inode);
+    }
+    
+    visiting.erase(inode);
+    
+    // Construct full path
+    std::string full_path;
+    if (parent_path.empty() || parent_path == "/") {
+        full_path = "/" + node.name;
+    } else {
+        full_path = parent_path + "/" + node.name;
+    }
+    
+    // Cache and return
+    path_cache[inode] = full_path;
+    return full_path;
+}
+
+std::string DirectoryTreeBuilder::resolvePath(uint32_t inode) {
+    return buildFullPath(inode);
+}
+
+std::string DirectoryTreeBuilder::getParentPath(uint32_t inode) {
+    auto it = nodes.find(inode);
+    if (it != nodes.end() && it->second.parent_inode != inode) {
+        return buildFullPath(it->second.parent_inode);
+    }
+    return "/";
+}
+
+bool DirectoryTreeBuilder::isValidPath(const std::string& path) {
+    return !path.empty() && path[0] == '/' && path.find("cycle_detected") == std::string::npos;
+}
+
+bool DirectoryTreeBuilder::hasNode(uint32_t inode) const {
+    return nodes.find(inode) != nodes.end();
+}
+
+const DirectoryNode* DirectoryTreeBuilder::getNode(uint32_t inode) const {
+    auto it = nodes.find(inode);
+    return (it != nodes.end()) ? &it->second : nullptr;
+}
+
+void DirectoryTreeBuilder::clearCache() {
+    path_cache.clear();
+}
+
+void DirectoryTreeBuilder::printTree(uint32_t root_inode, int depth) const {
+    auto it = nodes.find(root_inode);
+    if (it == nodes.end()) return;
+    
+    const DirectoryNode& node = it->second;
+    
+    // Print indentation
+    for (int i = 0; i < depth; ++i) {
+        std::cout << "  ";
+    }
+    
+    std::cout << node.name << " (inode: " << node.inode_number << ")" << std::endl;
+    
+    // Recursively print children
+    if (depth < 10) { // Prevent excessive depth
+        for (uint32_t child_inode : node.children) {
+            printTree(child_inode, depth + 1);
+        }
+    }
+}
+
+// Phase 3 JournalParser methods
+
+std::string JournalParser::buildFullPath(uint32_t inode) {
+    return directory_tree.buildFullPath(inode);
+}
+
+std::string JournalParser::resolveInodePath(uint32_t inode) {
+    return directory_tree.resolvePath(inode);
+}
+
+void JournalParser::updateDirectoryTree(const std::vector<EXT4DirectoryEntry>& entries, uint32_t parent_inode) {
+    for (const auto& entry : entries) {
+        directory_tree.addDirectoryEntry(parent_inode, entry);
+    }
+}
+
+void JournalParser::updateDirectoryTreeFromInodes(const std::vector<EXT4Inode>& inodes, const std::vector<uint32_t>& inode_numbers) {
+    for (size_t i = 0; i < inodes.size() && i < inode_numbers.size(); ++i) {
+        directory_tree.addInodeInfo(inode_numbers[i], inodes[i]);
+    }
+}
+
+std::string JournalParser::handleSpecialPaths(uint32_t inode, const std::string& name) {
+    if (isRootDirectory(inode)) {
+        return "/";
+    }
+    
+    if (isLostAndFound(inode)) {
+        return "/lost+found";
+    }
+    
+    // Handle other special cases
+    if (name.empty()) {
+        return "/unknown_" + std::to_string(inode);
+    }
+    
+    return name;
+}
+
+bool JournalParser::isRootDirectory(uint32_t inode) {
+    return inode == 2; // EXT4 root directory inode
+}
+
+bool JournalParser::isLostAndFound(uint32_t inode) {
+    return inode == 11; // Typical lost+found inode
 }
