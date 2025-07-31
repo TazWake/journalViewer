@@ -157,9 +157,9 @@ private:
     std::unordered_map<std::string, uint32_t> name_to_inode;     // name -> inode mapping
     uint32_t root_inode;
     
-    static const uint32_t EXT4_ROOT_INODE = 2;
-    static const uint32_t EXT4_LOST_FOUND_INODE = 11;
-    static const size_t MAX_PATH_DEPTH = 256;
+    static constexpr uint32_t EXT4_ROOT_INODE = 2;
+    static constexpr uint32_t EXT4_LOST_FOUND_INODE = 11;
+    static constexpr size_t MAX_PATH_DEPTH = 256;
     
 public:
     DirectoryTreeBuilder();
