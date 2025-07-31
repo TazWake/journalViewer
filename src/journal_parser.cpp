@@ -43,15 +43,35 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
     char block_buffer[BLOCK_SIZE];
     uint32_t current_transaction_seq = 0;
     std::vector<DescriptorEntry> current_descriptors;
+    int blocks_scanned = 0;
+    int valid_headers = 0;
     
     for (long offset = journal_offset; offset < journal_offset + journal_size; offset += BLOCK_SIZE) {
+        blocks_scanned++;
+        
         if (!image_handler.readBytes(offset, block_buffer, BLOCK_SIZE)) {
+            if (blocks_scanned <= 10) {
+                std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset << " - read failed" << std::endl;
+            }
             continue; // Skip unreadable blocks
         }
         
         JournalHeader header;
         if (!parseJournalHeader(block_buffer, header)) {
+            if (blocks_scanned <= 10) {
+                uint32_t* magic = reinterpret_cast<uint32_t*>(block_buffer);
+                std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset 
+                          << " - invalid header, magic=0x" << std::hex << *magic << std::dec << std::endl;
+            }
             continue; // Skip blocks without valid journal header
+        }
+        
+        valid_headers++;
+        if (blocks_scanned <= 10) {
+            std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset 
+                      << " - valid header, magic=0x" << std::hex << header.magic 
+                      << " type=" << std::dec << header.block_type 
+                      << " seq=" << header.sequence << std::endl;
         }
         
         // Filter by sequence number if specified
@@ -160,6 +180,9 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
             }
         }
     }
+    
+    std::cout << "Debug: Scanned " << blocks_scanned << " blocks, found " << valid_headers 
+              << " valid headers, created " << transactions.size() << " transactions" << std::endl;
     
     return transactions;
 }
