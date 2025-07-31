@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <libewf.h>
 
-ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO), partition_offset(0) {
+ImageHandler::ImageHandler() : ewf_handle(nullptr), current_type(ImageType::AUTO), partition_offset(0), verbose_mode(false) {
     journal_location = {0, 0, false};
 }
 
@@ -121,6 +121,7 @@ void ImageHandler::setPartitionOffset(long offset) {
 }
 
 bool ImageHandler::locateJournal(long manual_offset, long manual_size, bool verbose) {
+    verbose_mode = verbose;
     if (manual_offset >= 0) {
         // Use manual offset - this should be relative to the partition start
         // The readBytes method will automatically apply the partition offset
@@ -205,8 +206,8 @@ bool ImageHandler::findJournalInSuperblock() {
     }
     
     // Debug: Dump first 64 bytes of journal inode
-    if (verbose) {
-        if (verbose) std::cout << "Debug: Journal inode contents (first 64 bytes):" << std::endl;
+    if (verbose_mode) {
+        std::cout << "Debug: Journal inode contents (first 64 bytes):" << std::endl;
         for (int i = 0; i < 64; i += 16) {
             std::cout << "  Offset " << i << ": ";
             for (int j = 0; j < 16 && i + j < 64; j++) {

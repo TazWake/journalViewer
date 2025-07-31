@@ -25,6 +25,7 @@ private:
     std::string image_path;
     JournalLocation journal_location;
     long partition_offset;
+    bool verbose_mode;
     
     // Helper methods
     ImageType detectImageType(const std::string& path);
