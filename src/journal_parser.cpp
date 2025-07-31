@@ -39,7 +39,8 @@ JournalParser::~JournalParser() {
 
 std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_handler, 
                                                            int start_seq, 
-                                                           int end_seq) {
+                                                           int end_seq,
+                                                           bool verbose) {
     std::vector<JournalTransaction> transactions;
     
     if (!image_handler.isJournalFound()) {
@@ -61,8 +62,10 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         }
     }
     
-    std::cout << "Parsing journal at offset " << journal_offset 
-              << " with size " << journal_size << " bytes" << std::endl;
+    if (verbose) {
+        std::cout << "Parsing journal at offset " << journal_offset 
+                  << " with size " << journal_size << " bytes" << std::endl;
+    }
     
     // Parse journal blocks
     char block_buffer[BLOCK_SIZE];
@@ -75,7 +78,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         blocks_scanned++;
         
         if (!image_handler.readBytes(offset, block_buffer, BLOCK_SIZE)) {
-            if (blocks_scanned <= 10) {
+            if (verbose && blocks_scanned <= 10) {
                 std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset << " - read failed" << std::endl;
             }
             continue; // Skip unreadable blocks
@@ -83,7 +86,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         
         JournalHeader header;
         if (!parseJournalHeader(block_buffer, header)) {
-            if (blocks_scanned <= 10) {
+            if (verbose && blocks_scanned <= 10) {
                 uint32_t* magic = reinterpret_cast<uint32_t*>(block_buffer);
                 std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset 
                           << " - invalid header, magic=0x" << std::hex << *magic << std::dec << std::endl;
@@ -92,7 +95,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         }
         
         valid_headers++;
-        if (blocks_scanned <= 10) {
+        if (verbose && blocks_scanned <= 10) {
             std::cout << "Debug: Block " << blocks_scanned << " at offset " << offset 
                       << " - valid header, magic=0x" << std::hex << header.magic 
                       << " type=" << std::dec << header.block_type 
@@ -118,7 +121,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         
         JournalBlockType block_type = static_cast<JournalBlockType>(header.block_type);
         
-        if (blocks_scanned <= 5) {
+        if (verbose && blocks_scanned <= 5) {
             std::cout << "  Processing block type " << header.block_type << " (mapped to " << (int)block_type << ")" << std::endl;
         }
         
@@ -129,7 +132,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                                                          BLOCK_SIZE - JOURNAL_HEADER_SIZE);
                 
                 // Debug output for descriptor entries
-                if (blocks_scanned <= 10) {
+                if (verbose && blocks_scanned <= 10) {
                     std::cout << "Debug: Descriptor block " << header.sequence << " found " << current_descriptors.size() 
                               << " entries:" << std::endl;
                     for (size_t i = 0; i < current_descriptors.size() && i < 5; ++i) {
@@ -249,7 +252,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                             BlockContentType content_type = identifyBlockType(data_block_buffer, BLOCK_SIZE);
                             
                             // Debug output for block type detection
-                            if (blocks_scanned <= 20) {
+                            if (verbose && blocks_scanned <= 20) {
                                 std::string content_type_str;
                                 switch (content_type) {
                                     case BlockContentType::INODE_TABLE: content_type_str = "INODE_TABLE"; break;
@@ -443,8 +446,10 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         }
     }
     
-    std::cout << "Debug: Scanned " << blocks_scanned << " blocks, found " << valid_headers 
-              << " valid headers, created " << transactions.size() << " transactions" << std::endl;
+    if (verbose) {
+        std::cout << "Debug: Scanned " << blocks_scanned << " blocks, found " << valid_headers 
+                  << " valid headers, created " << transactions.size() << " transactions" << std::endl;
+    }
     
     // Update relative timestamps based on sequence numbers
     if (!transactions.empty()) {
@@ -457,7 +462,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         performForensicAnalysis(transactions);
         
         // Generate forensic summary if verbose mode
-        if (valid_headers > 0) {
+        if (verbose && valid_headers > 0) {
             generateForensicSummary();
         }
     }

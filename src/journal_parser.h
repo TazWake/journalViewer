@@ -307,7 +307,8 @@ public:
     // Main parsing interface
     std::vector<JournalTransaction> parseJournal(ImageHandler& image_handler, 
                                                 int start_seq = -1, 
-                                                int end_seq = -1);
+                                                int end_seq = -1,
+                                                bool verbose = false);
     
     // Utility methods
     bool validateJournalStructure(ImageHandler& image_handler);

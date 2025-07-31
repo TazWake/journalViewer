@@ -200,7 +200,7 @@ int main(int argc, char* argv[]) {
 
         // Parse journal
         if (verbose) std::cout << "Parsing journal transactions...\n";
-        auto transactions = journal_parser.parseJournal(image_handler, start_seq, end_seq);
+        auto transactions = journal_parser.parseJournal(image_handler, start_seq, end_seq, verbose);
         
         if (transactions.empty()) {
             std::cerr << "Warning: No journal transactions found.\n";
