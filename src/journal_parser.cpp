@@ -172,8 +172,8 @@ bool JournalParser::parseJournalHeader(const char* data, JournalHeader& header) 
     memcpy(&header.block_type, data + 4, 4);
     memcpy(&header.sequence, data + 8, 4);
     
-    // Validate magic number
-    return (header.magic == JBD2_MAGIC);
+    // Validate magic number (accept both JBD and JBD2)
+    return (header.magic == JBD2_MAGIC || header.magic == JBD_MAGIC);
 }
 
 std::vector<DescriptorEntry> JournalParser::parseDescriptorBlock(const char* data, size_t size) {

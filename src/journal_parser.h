@@ -44,6 +44,7 @@ struct DescriptorEntry {
 class JournalParser {
 private:
     static const uint32_t JBD2_MAGIC = 0x9839B3C0; // Little-endian of 0xC03B3998
+    static const uint32_t JBD_MAGIC = 0x98393BC0;  // Little-endian of 0xC03B3998 (JBD/EXT3)
     static const size_t JOURNAL_HEADER_SIZE = 12;
     static const size_t BLOCK_SIZE = 4096; // Standard EXT block size
     

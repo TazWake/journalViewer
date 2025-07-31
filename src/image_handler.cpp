@@ -214,6 +214,12 @@ bool ImageHandler::findJournalInSuperblock() {
         std::cout << std::endl;
     }
     
+    // Read journal size from inode (bytes 4-7: lower 32 bits of size)
+    uint32_t* inode_size_lo = reinterpret_cast<uint32_t*>(&journal_inode[4]);
+    uint64_t journal_size = *inode_size_lo;
+    
+    std::cout << "Debug: Journal size from inode = " << journal_size << " bytes" << std::endl;
+    
     // Check if inode uses extents (EXT4 feature)
     uint32_t* inode_flags = reinterpret_cast<uint32_t*>(&journal_inode[32]);
     const uint32_t EXT4_EXTENTS_FL = 0x00080000;
@@ -294,7 +300,7 @@ bool ImageHandler::findJournalInSuperblock() {
     
     if (validateJournalMagic(journal_offset)) {
         journal_location.offset = journal_offset;
-        journal_location.size = 0; // Will be determined from journal superblock
+        journal_location.size = journal_size; // Use size from inode
         journal_location.found = true;
         std::cout << "Found journal at offset " << journal_offset << std::endl;
         return true;
