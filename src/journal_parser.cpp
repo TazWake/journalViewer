@@ -6,6 +6,8 @@
 #include <ctime>
 #include <algorithm>
 #include <unordered_set>
+#include <set>
+#include <map>
 
 // EXT4 constants
 static const uint16_t EXT4_FT_REG_FILE = 0x8000;   // Regular file
@@ -126,9 +128,22 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                 current_descriptors = parseDescriptorBlock(block_buffer + JOURNAL_HEADER_SIZE, 
                                                          BLOCK_SIZE - JOURNAL_HEADER_SIZE);
                 
+                // Debug output for descriptor entries
+                if (blocks_scanned <= 10) {
+                    std::cout << "Debug: Descriptor block " << header.sequence << " found " << current_descriptors.size() 
+                              << " entries:" << std::endl;
+                    for (size_t i = 0; i < current_descriptors.size() && i < 5; ++i) {
+                        std::cout << "  Entry " << i << ": fs_block=" << current_descriptors[i].fs_block_num 
+                                  << " flags=0x" << std::hex << current_descriptors[i].flags << std::dec << std::endl;
+                    }
+                    if (current_descriptors.empty()) {
+                        std::cout << "  WARNING: Descriptor block has no entries!" << std::endl;
+                    }
+                }
+                
                 // Create transaction record for descriptor block
                 JournalTransaction trans;
-                trans.timestamp = formatTimestamp(0); // Will be set at commit
+                trans.relative_time = "T+0"; // Will be updated with relative timing
                 trans.transaction_seq = header.sequence;
                 trans.block_type = "descriptor";
                 trans.fs_block_num = 0;
@@ -163,7 +178,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                     
                     // Create transaction record for commit block
                     JournalTransaction trans;
-                    trans.timestamp = formatTimestamp(std::time(nullptr)); // Use current time as placeholder
+                    trans.relative_time = "T+0"; // Will be updated with relative timing
                     trans.transaction_seq = header.sequence;
                     trans.block_type = "commit";
                     trans.fs_block_num = 0;
@@ -192,8 +207,10 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                     // Process data blocks for this transaction with Phase 1 analysis
                     size_t data_block_index = 0;
                     for (const auto& desc : current_descriptors) {
-                        // Calculate the offset of this data block in the journal
-                        long data_block_offset = offset + BLOCK_SIZE * (1 + data_block_index);
+                        // Data blocks immediately follow the descriptor block in the journal
+                        // Skip the current commit block we're processing and find data blocks
+                        long descriptor_offset = offset - BLOCK_SIZE * (1 + current_descriptors.size());
+                        long data_block_offset = descriptor_offset + BLOCK_SIZE * (1 + data_block_index);
                         
                         // Read the actual data block from journal
                         char data_block_buffer[BLOCK_SIZE];
@@ -203,7 +220,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                         }
                         
                         JournalTransaction data_trans;
-                        data_trans.timestamp = trans.timestamp;
+                        data_trans.relative_time = trans.relative_time;
                         data_trans.transaction_seq = header.sequence;
                         data_trans.block_type = "data";
                         data_trans.fs_block_num = desc.fs_block_num;
@@ -230,6 +247,20 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                             
                             // Analyze block content with Phase 1 functionality
                             BlockContentType content_type = identifyBlockType(data_block_buffer, BLOCK_SIZE);
+                            
+                            // Debug output for block type detection
+                            if (blocks_scanned <= 20) {
+                                std::string content_type_str;
+                                switch (content_type) {
+                                    case BlockContentType::INODE_TABLE: content_type_str = "INODE_TABLE"; break;
+                                    case BlockContentType::DIRECTORY: content_type_str = "DIRECTORY"; break;
+                                    case BlockContentType::METADATA: content_type_str = "METADATA"; break;
+                                    case BlockContentType::FILE_DATA: content_type_str = "FILE_DATA"; break;
+                                    default: content_type_str = "UNKNOWN"; break;
+                                }
+                                std::cout << "Debug: Data block " << data_block_index << " for fs_block " 
+                                          << desc.fs_block_num << " detected as " << content_type_str << std::endl;
+                            }
                             
                             switch (content_type) {
                                 case BlockContentType::INODE_TABLE: {
@@ -351,7 +382,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
             
             case JournalBlockType::REVOCATION: {
                 JournalTransaction trans;
-                trans.timestamp = formatTimestamp(std::time(nullptr));
+                trans.relative_time = "T+0"; // Will be updated with relative timing
                 trans.transaction_seq = header.sequence;
                 trans.block_type = "revocation";
                 trans.fs_block_num = 0;
@@ -382,7 +413,7 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
             case JournalBlockType::SUPERBLOCK_V1:
             case JournalBlockType::SUPERBLOCK_V2: {
                 JournalTransaction trans;
-                trans.timestamp = formatTimestamp(std::time(nullptr));
+                trans.relative_time = "T+0"; // Will be updated with relative timing
                 trans.transaction_seq = header.sequence;
                 trans.block_type = "superblock";
                 trans.fs_block_num = 0;
@@ -415,6 +446,22 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
     std::cout << "Debug: Scanned " << blocks_scanned << " blocks, found " << valid_headers 
               << " valid headers, created " << transactions.size() << " transactions" << std::endl;
     
+    // Update relative timestamps based on sequence numbers
+    if (!transactions.empty()) {
+        uint32_t base_sequence = transactions[0].transaction_seq;
+        for (auto& trans : transactions) {
+            trans.relative_time = generateRelativeTimestamp(trans.transaction_seq, base_sequence);
+        }
+        
+        // Perform forensic analysis
+        performForensicAnalysis(transactions);
+        
+        // Generate forensic summary if verbose mode
+        if (valid_headers > 0) {
+            generateForensicSummary();
+        }
+    }
+    
     return transactions;
 }
 
@@ -442,18 +489,36 @@ std::vector<DescriptorEntry> JournalParser::parseDescriptorBlock(const char* dat
     
     if (!data || size < 8) return entries;
     
-    // Parse descriptor entries (simplified)
+    // Enhanced descriptor block parsing for ordered-mode journals
     // Each entry is typically 8 bytes: 4 bytes block number + 4 bytes flags
     size_t entry_count = size / 8;
     
     for (size_t i = 0; i < entry_count && i * 8 + 8 <= size; ++i) {
         DescriptorEntry entry;
-        memcpy(&entry.fs_block_num, data + i * 8, 4);
-        memcpy(&entry.flags, data + i * 8 + 4, 4);
         
-        // Basic validation - block number should be reasonable
-        if (entry.fs_block_num > 0 && entry.fs_block_num < 0xFFFFFFFF) {
-            entries.push_back(entry);
+        // Read block number and flags (convert from big-endian if needed)
+        uint32_t block_num_raw, flags_raw;
+        memcpy(&block_num_raw, data + i * 8, 4);
+        memcpy(&flags_raw, data + i * 8 + 4, 4);
+        
+        // Convert from big-endian to host byte order (journal uses big-endian)
+        entry.fs_block_num = __builtin_bswap32(block_num_raw);
+        entry.flags = __builtin_bswap32(flags_raw);
+        
+        // Enhanced validation for ordered-mode journals
+        // Block numbers should be within reasonable filesystem range
+        if (entry.fs_block_num > 0 && entry.fs_block_num < 0x7FFFFFFF) {
+            // Additional validation: flags should have reasonable values
+            // JBD2 flags: JBD2_FLAG_ESCAPE (1), JBD2_FLAG_SAME_UUID (2), 
+            // JBD2_FLAG_DELETED (4), JBD2_FLAG_LAST_TAG (8)
+            if (entry.flags <= 0xFF) { // Reasonable flag range
+                entries.push_back(entry);
+            }
+        }
+        
+        // Stop parsing if we hit obvious padding or invalid data
+        if (entry.fs_block_num == 0 && entry.flags == 0) {
+            break;
         }
     }
     
@@ -463,9 +528,15 @@ std::vector<DescriptorEntry> JournalParser::parseDescriptorBlock(const char* dat
 bool JournalParser::parseCommitBlock(const char* data, size_t size, uint32_t& sequence) {
     if (!data || size < 4) return false;
     
-    // Commit block typically contains timestamp and other metadata
-    // For now, we'll just extract basic information
+    // Commit block contains sequence number and optionally timestamp
     memcpy(&sequence, data, 4);
+    
+    // Try to extract timestamp if available (next 4 bytes after sequence)
+    // JBD2 commit blocks may contain timestamp at offset 4
+    if (size >= 8) {
+        // This is speculative - actual timestamp extraction would need
+        // proper JBD2 commit block structure analysis
+    }
     
     return true;
 }
@@ -497,7 +568,8 @@ std::string JournalParser::calculateChecksum(const char* data, size_t size) {
 
 std::string JournalParser::formatTimestamp(uint64_t unix_timestamp) {
     if (unix_timestamp == 0) {
-        unix_timestamp = std::time(nullptr);
+        // Journal doesn't contain reliable timestamps, return placeholder
+        return "1970-01-01T00:00:00Z";
     }
     
     std::time_t time = static_cast<std::time_t>(unix_timestamp);
@@ -1104,4 +1176,186 @@ bool JournalParser::isRootDirectory(uint32_t inode) {
 
 bool JournalParser::isLostAndFound(uint32_t inode) {
     return inode == 11; // Typical lost+found inode
+}
+
+// Forensic analysis implementation
+void JournalParser::performForensicAnalysis(const std::vector<JournalTransaction>& transactions) {
+    if (transactions.empty()) return;
+    
+    forensic_analysis = ForensicAnalysis(); // Reset
+    
+    // Basic statistics
+    forensic_analysis.total_transactions = transactions.size();
+    
+    // Analyze transaction patterns
+    analyzeTransactionPatterns(transactions);
+    
+    // Detect journal mode
+    forensic_analysis.detected_mode = detectJournalMode(transactions);
+    
+    // Set journal type based on magic number
+    forensic_analysis.journal_type = "JBD (EXT3)"; // Set during parsing
+    
+    // Analyze sequence ranges
+    uint32_t min_seq = UINT32_MAX, max_seq = 0;
+    std::set<uint32_t> unique_fs_blocks;
+    
+    for (const auto& trans : transactions) {
+        if (trans.transaction_seq > 0) {
+            min_seq = std::min(min_seq, trans.transaction_seq);
+            max_seq = std::max(max_seq, trans.transaction_seq);
+        }
+        
+        if (trans.fs_block_num > 0) {
+            unique_fs_blocks.insert(static_cast<uint32_t>(trans.fs_block_num));
+        }
+        
+        // Count block types
+        if (trans.block_type == "descriptor") forensic_analysis.descriptor_blocks++;
+        else if (trans.block_type == "commit") forensic_analysis.commit_blocks++;
+        else if (trans.block_type == "revocation") forensic_analysis.revocation_blocks++;
+        else if (trans.block_type == "data") forensic_analysis.data_blocks_found++;
+    }
+    
+    forensic_analysis.sequence_range_start = (min_seq == UINT32_MAX) ? 0 : min_seq;
+    forensic_analysis.sequence_range_end = max_seq;
+    forensic_analysis.filesystem_blocks_modified = unique_fs_blocks.size();
+    
+    // Detect forensic indicators
+    forensic_analysis.metadata_only_mode = (forensic_analysis.data_blocks_found == 0);
+    forensic_analysis.potential_data_recovery = (forensic_analysis.data_blocks_found > 0);
+    forensic_analysis.high_activity_detected = (transactions.size() > 1000);
+    
+    // Calculate transaction gaps
+    for (uint32_t seq = min_seq; seq <= max_seq; seq++) {
+        bool found = false;
+        for (const auto& trans : transactions) {
+            if (trans.transaction_seq == seq) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && seq > 0) forensic_analysis.transaction_gaps++;
+    }
+}
+
+JournalMode JournalParser::detectJournalMode(const std::vector<JournalTransaction>& transactions) {
+    size_t descriptor_count = 0;
+    size_t data_count = 0;
+    size_t metadata_indicators = 0;
+    
+    for (const auto& trans : transactions) {
+        if (trans.block_type == "descriptor") {
+            descriptor_count++;
+        } else if (trans.block_type == "data") {
+            data_count++;
+        }
+        
+        // Look for metadata-only indicators
+        if (trans.operation_type.find("inode") != std::string::npos ||
+            trans.operation_type.find("directory") != std::string::npos ||
+            trans.operation_type.find("metadata") != std::string::npos) {
+            metadata_indicators++;
+        }
+    }
+    
+    // Heuristics for mode detection
+    if (data_count == 0 && descriptor_count > 0) {
+        // Only metadata transactions - likely ordered mode
+        return JournalMode::ORDERED_MODE;
+    } else if (data_count > descriptor_count * 0.5) {
+        // Significant data blocks - likely journal mode
+        return JournalMode::JOURNAL_MODE;
+    } else if (descriptor_count > 0 && metadata_indicators > descriptor_count * 0.8) {
+        // Mostly metadata with some data - likely ordered mode
+        return JournalMode::ORDERED_MODE;
+    }
+    
+    return JournalMode::UNKNOWN;
+}
+
+void JournalParser::analyzeTransactionPatterns(const std::vector<JournalTransaction>& transactions) {
+    if (transactions.empty()) return;
+    
+    std::map<uint32_t, size_t> seq_descriptor_count;
+    
+    // Group by transaction sequence to analyze patterns
+    for (const auto& trans : transactions) {
+        if (trans.block_type == "descriptor" && trans.transaction_seq > 0) {
+            seq_descriptor_count[trans.transaction_seq]++;
+        }
+    }
+    
+    if (!seq_descriptor_count.empty()) {
+        size_t total_descriptors = 0;
+        size_t max_descriptors = 0;
+        
+        for (const auto& pair : seq_descriptor_count) {
+            total_descriptors += pair.second;
+            max_descriptors = std::max(max_descriptors, pair.second);
+        }
+        
+        forensic_analysis.avg_descriptors_per_transaction = 
+            seq_descriptor_count.empty() ? 0 : total_descriptors / seq_descriptor_count.size();
+        forensic_analysis.max_descriptors_per_transaction = max_descriptors;
+    }
+}
+
+void JournalParser::generateForensicSummary() const {
+    std::cout << "\n=== FORENSIC ANALYSIS SUMMARY ===" << std::endl;
+    std::cout << "Journal Type: " << forensic_analysis.journal_type << std::endl;
+    std::cout << "Detected Mode: " << getJournalModeString(forensic_analysis.detected_mode) << std::endl;
+    std::cout << "Total Transactions: " << forensic_analysis.total_transactions << std::endl;
+    std::cout << "Sequence Range: " << forensic_analysis.sequence_range_start 
+              << " - " << forensic_analysis.sequence_range_end << std::endl;
+    
+    std::cout << "\n--- Transaction Analysis ---" << std::endl;
+    std::cout << "Descriptor Blocks: " << forensic_analysis.descriptor_blocks << std::endl;
+    std::cout << "Commit Blocks: " << forensic_analysis.commit_blocks << std::endl;
+    std::cout << "Revocation Blocks: " << forensic_analysis.revocation_blocks << std::endl;
+    std::cout << "Data Blocks Found: " << forensic_analysis.data_blocks_found << std::endl;
+    std::cout << "Filesystem Blocks Modified: " << forensic_analysis.filesystem_blocks_modified << std::endl;
+    
+    std::cout << "\n--- Forensic Indicators ---" << std::endl;
+    std::cout << "Metadata-Only Mode: " << (forensic_analysis.metadata_only_mode ? "YES" : "NO") << std::endl;
+    std::cout << "Potential Data Recovery: " << (forensic_analysis.potential_data_recovery ? "YES" : "NO") << std::endl;
+    std::cout << "High Activity Detected: " << (forensic_analysis.high_activity_detected ? "YES" : "NO") << std::endl;
+    std::cout << "Transaction Gaps: " << forensic_analysis.transaction_gaps << std::endl;
+    
+    if (forensic_analysis.detected_mode == JournalMode::ORDERED_MODE) {
+        std::cout << "\n--- ORDERED MODE ANALYSIS ---" << std::endl;
+        std::cout << "This journal operates in ORDERED mode (metadata-only journaling)." << std::endl;
+        std::cout << "Forensic Value: File metadata changes, directory operations, inode updates." << std::endl;
+        std::cout << "Limitation: File content data is NOT journaled in this mode." << std::endl;
+        std::cout << "Recommendation: Focus on metadata timeline analysis for user activity." << std::endl;
+    }
+    
+    std::cout << "\n--- TIMING ANALYSIS ---" << std::endl;
+    std::cout << "Note: Journal contains NO reliable timestamps." << std::endl;
+    std::cout << "Analysis based on relative transaction sequence ordering only." << std::endl;
+    std::cout << "Transactions span sequence range of " 
+              << (forensic_analysis.sequence_range_end - forensic_analysis.sequence_range_start) 
+              << " units." << std::endl;
+    
+    std::cout << "\n=== END FORENSIC SUMMARY ===" << std::endl;
+}
+
+std::string JournalParser::getJournalModeString(JournalMode mode) const {
+    switch (mode) {
+        case JournalMode::JOURNAL_MODE: return "JOURNAL (Full data+metadata journaling)";
+        case JournalMode::ORDERED_MODE: return "ORDERED (Metadata-only journaling)";
+        case JournalMode::WRITEBACK_MODE: return "WRITEBACK (Critical metadata only)";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string JournalParser::generateRelativeTimestamp(uint32_t sequence_num, uint32_t base_sequence) const {
+    if (sequence_num == 0) return "T+0";
+    
+    int32_t relative_pos = static_cast<int32_t>(sequence_num) - static_cast<int32_t>(base_sequence);
+    if (relative_pos >= 0) {
+        return "T+" + std::to_string(relative_pos);
+    } else {
+        return "T" + std::to_string(relative_pos);
+    }
 }

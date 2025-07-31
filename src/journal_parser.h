@@ -90,6 +90,57 @@ enum class FileOperationType {
     OWNERSHIP_CHANGED
 };
 
+// Journal operating modes
+enum class JournalMode {
+    UNKNOWN,
+    JOURNAL_MODE,    // All data and metadata journaled
+    ORDERED_MODE,    // Only metadata journaled (most common)
+    WRITEBACK_MODE   // Only critical metadata journaled
+};
+
+// Forensic analysis statistics
+struct ForensicAnalysis {
+    // Journal characteristics
+    JournalMode detected_mode;
+    std::string journal_type;           // JBD vs JBD2
+    size_t total_transactions;
+    size_t total_blocks_scanned;
+    size_t valid_journal_blocks;
+    
+    // Transaction analysis  
+    uint32_t sequence_range_start;
+    uint32_t sequence_range_end;
+    size_t descriptor_blocks;
+    size_t commit_blocks;
+    size_t revocation_blocks;
+    size_t data_blocks_found;
+    
+    // Activity patterns
+    size_t avg_descriptors_per_transaction;
+    size_t max_descriptors_per_transaction;
+    std::vector<uint32_t> active_sequence_ranges;
+    
+    // Timing analysis (relative)
+    bool has_timestamps;
+    size_t transaction_gaps;           // Missing sequence numbers
+    size_t rapid_transactions;         // Sequential transactions
+    
+    // Forensic indicators
+    bool potential_data_recovery;      // Data blocks present
+    bool metadata_only_mode;           // Only metadata transactions
+    bool high_activity_detected;       // Frequent transactions
+    size_t filesystem_blocks_modified; // Unique fs blocks referenced
+    
+    ForensicAnalysis() : detected_mode(JournalMode::UNKNOWN), journal_type("Unknown"),
+                        total_transactions(0), total_blocks_scanned(0), valid_journal_blocks(0),
+                        sequence_range_start(0), sequence_range_end(0), descriptor_blocks(0),
+                        commit_blocks(0), revocation_blocks(0), data_blocks_found(0),
+                        avg_descriptors_per_transaction(0), max_descriptors_per_transaction(0),
+                        has_timestamps(false), transaction_gaps(0), rapid_transactions(0),
+                        potential_data_recovery(false), metadata_only_mode(false),
+                        high_activity_detected(false), filesystem_blocks_modified(0) {}
+};
+
 // Change type for tracking modifications
 enum class ChangeType {
     UNKNOWN,
@@ -106,7 +157,7 @@ enum class ChangeType {
 
 // Journal transaction record with Phase 1 enhancements
 struct JournalTransaction {
-    std::string timestamp;          // ISO 8601 format
+    std::string relative_time;      // Relative timing (T+0, T+1, etc.) - no absolute timestamps
     uint32_t transaction_seq;       // Transaction sequence number
     std::string block_type;         // descriptor/data/commit/revocation
     uint64_t fs_block_num;         // Filesystem block number
@@ -229,6 +280,15 @@ private:
     std::string handleSpecialPaths(uint32_t inode, const std::string& name);
     bool isRootDirectory(uint32_t inode);
     bool isLostAndFound(uint32_t inode);
+    
+    // Forensic analysis and statistics
+    ForensicAnalysis forensic_analysis;
+    void performForensicAnalysis(const std::vector<JournalTransaction>& transactions);
+    JournalMode detectJournalMode(const std::vector<JournalTransaction>& transactions);
+    void analyzeTransactionPatterns(const std::vector<JournalTransaction>& transactions);
+    void generateForensicSummary() const;
+    std::string getJournalModeString(JournalMode mode) const;
+    std::string generateRelativeTimestamp(uint32_t sequence_num, uint32_t base_sequence) const;
     
     // Journal superblock parsing
     struct JournalSuperblock {
