@@ -72,6 +72,15 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
                       << " - valid header, magic=0x" << std::hex << header.magic 
                       << " type=" << std::dec << header.block_type 
                       << " seq=" << header.sequence << std::endl;
+            
+            // Show raw header bytes for first few blocks
+            if (blocks_scanned <= 3) {
+                std::cout << "  Raw header bytes: ";
+                for (int i = 0; i < 12; i++) {
+                    printf("%02x ", (unsigned char)block_buffer[i]);
+                }
+                std::cout << std::endl;
+            }
         }
         
         // Filter by sequence number if specified
@@ -83,6 +92,10 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         }
         
         JournalBlockType block_type = static_cast<JournalBlockType>(header.block_type);
+        
+        if (blocks_scanned <= 5) {
+            std::cout << "  Processing block type " << header.block_type << " (mapped to " << (int)block_type << ")" << std::endl;
+        }
         
         switch (block_type) {
             case JournalBlockType::DESCRIPTOR: {
