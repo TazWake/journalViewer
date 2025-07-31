@@ -203,10 +203,17 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
 bool JournalParser::parseJournalHeader(const char* data, JournalHeader& header) {
     if (!data) return false;
     
-    // Copy header data (assuming little-endian host)
+    // Copy header data - the data is stored in big-endian format in the journal
     memcpy(&header.magic, data, 4);
-    memcpy(&header.block_type, data + 4, 4);
-    memcpy(&header.sequence, data + 8, 4);
+    
+    // Block type and sequence are stored as big-endian, need to convert
+    uint32_t block_type_be, sequence_be;
+    memcpy(&block_type_be, data + 4, 4);
+    memcpy(&sequence_be, data + 8, 4);
+    
+    // Convert from big-endian to host byte order
+    header.block_type = __builtin_bswap32(block_type_be);
+    header.sequence = __builtin_bswap32(sequence_be);
     
     // Validate magic number (accept both JBD and JBD2)
     return (header.magic == JBD2_MAGIC || header.magic == JBD_MAGIC);
