@@ -40,7 +40,7 @@ public:
     // Main interface methods
     bool openImage(const std::string& path, const std::string& type_str = "auto");
     void setPartitionOffset(long offset);
-    bool locateJournal(long manual_offset = -1, long manual_size = -1);
+    bool locateJournal(long manual_offset = -1, long manual_size = -1, bool verbose = false);
     
     // Data reading methods
     bool readBytes(long offset, char* buffer, size_t size);

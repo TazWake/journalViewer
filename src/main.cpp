@@ -193,7 +193,7 @@ int main(int argc, char* argv[]) {
 
         // Locate journal
         if (verbose) std::cout << "Locating journal...\n";
-        if (!image_handler.locateJournal(journal_offset, journal_size)) {
+        if (!image_handler.locateJournal(journal_offset, journal_size, verbose)) {
             std::cerr << "Error: Failed to locate journal in image.\n";
             return 1;
         }

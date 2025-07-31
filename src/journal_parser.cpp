@@ -461,8 +461,8 @@ std::vector<JournalTransaction> JournalParser::parseJournal(ImageHandler& image_
         // Perform forensic analysis
         performForensicAnalysis(transactions);
         
-        // Generate forensic summary if verbose mode
-        if (verbose && valid_headers > 0) {
+        // Always generate forensic summary for important forensic context
+        if (valid_headers > 0) {
             generateForensicSummary();
         }
     }

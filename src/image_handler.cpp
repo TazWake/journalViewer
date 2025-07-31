@@ -120,7 +120,7 @@ void ImageHandler::setPartitionOffset(long offset) {
     }
 }
 
-bool ImageHandler::locateJournal(long manual_offset, long manual_size) {
+bool ImageHandler::locateJournal(long manual_offset, long manual_size, bool verbose) {
     if (manual_offset >= 0) {
         // Use manual offset - this should be relative to the partition start
         // The readBytes method will automatically apply the partition offset
@@ -205,28 +205,30 @@ bool ImageHandler::findJournalInSuperblock() {
     }
     
     // Debug: Dump first 64 bytes of journal inode
-    std::cout << "Debug: Journal inode contents (first 64 bytes):" << std::endl;
-    for (int i = 0; i < 64; i += 16) {
-        std::cout << "  Offset " << i << ": ";
-        for (int j = 0; j < 16 && i + j < 64; j++) {
-            printf("%02x ", (unsigned char)journal_inode[i + j]);
+    if (verbose) {
+        if (verbose) std::cout << "Debug: Journal inode contents (first 64 bytes):" << std::endl;
+        for (int i = 0; i < 64; i += 16) {
+            std::cout << "  Offset " << i << ": ";
+            for (int j = 0; j < 16 && i + j < 64; j++) {
+                printf("%02x ", (unsigned char)journal_inode[i + j]);
+            }
+            std::cout << std::endl;
         }
-        std::cout << std::endl;
     }
     
     // Read journal size from inode (bytes 4-7: lower 32 bits of size)
     uint32_t* inode_size_lo = reinterpret_cast<uint32_t*>(&journal_inode[4]);
     uint64_t journal_size = *inode_size_lo;
     
-    std::cout << "Debug: Journal size from inode = " << journal_size << " bytes" << std::endl;
+    if (verbose) std::cout << "Debug: Journal size from inode = " << journal_size << " bytes" << std::endl;
     
     // Check if inode uses extents (EXT4 feature)
     uint32_t* inode_flags = reinterpret_cast<uint32_t*>(&journal_inode[32]);
     const uint32_t EXT4_EXTENTS_FL = 0x00080000;
     bool uses_extents = (*inode_flags & EXT4_EXTENTS_FL) != 0;
     
-    std::cout << "Debug: Inode flags = 0x" << std::hex << *inode_flags << std::dec 
-              << (uses_extents ? " (uses extents)" : " (direct blocks)") << std::endl;
+    if (verbose) std::cout << "Debug: Inode flags = 0x" << std::hex << *inode_flags << std::dec 
+                  << (uses_extents ? " (uses extents)" : " (direct blocks)") << std::endl;
     
     uint32_t journal_block = 0;
     
@@ -237,9 +239,9 @@ bool ImageHandler::findJournalInSuperblock() {
         uint16_t* extent_max = reinterpret_cast<uint16_t*>(&journal_inode[44]);
         uint16_t* extent_depth = reinterpret_cast<uint16_t*>(&journal_inode[46]);
         
-        std::cout << "Debug: Extent header - magic=0x" << std::hex << *extent_magic 
-                  << " entries=" << std::dec << *extent_entries 
-                  << " max=" << *extent_max << " depth=" << *extent_depth << std::endl;
+        if (verbose) std::cout << "Debug: Extent header - magic=0x" << std::hex << *extent_magic 
+                      << " entries=" << std::dec << *extent_entries 
+                      << " max=" << *extent_max << " depth=" << *extent_depth << std::endl;
         
         if (*extent_magic == 0xF30A && *extent_entries > 0) {
             // Read first extent entry (starts at offset 48)
@@ -249,11 +251,13 @@ bool ImageHandler::findJournalInSuperblock() {
             uint16_t* extent_start_hi = reinterpret_cast<uint16_t*>(&journal_inode[54]);
             uint32_t* extent_start_lo = reinterpret_cast<uint32_t*>(&journal_inode[56]);
             
-            std::cout << "Debug: Raw extent bytes:" << std::endl;
-            for (int i = 48; i < 64; i++) {
-                printf(" %02x", (unsigned char)journal_inode[i]);
+            if (verbose) {
+                std::cout << "Debug: Raw extent bytes:" << std::endl;
+                for (int i = 48; i < 64; i++) {
+                    printf(" %02x", (unsigned char)journal_inode[i]);
+                }
+                std::cout << std::endl;
             }
-            std::cout << std::endl;
             
             // EXT4 extent entry format (12 bytes total):
             // logical(4) + len(2) + start_hi(2) + start_lo(4)
@@ -272,7 +276,7 @@ bool ImageHandler::findJournalInSuperblock() {
             uint32_t actual_start = *reinterpret_cast<uint32_t*>(&journal_inode[60]);
             journal_block = actual_start;
             
-            std::cout << "Debug: Extent parsing - logical=" << *extent_logical 
+            if (verbose) std::cout << "Debug: Extent parsing - logical=" << *extent_logical 
                       << " len=" << *extent_len 
                       << " start_hi=" << *extent_start_hi
                       << " start_lo=" << *extent_start_lo
@@ -286,7 +290,7 @@ bool ImageHandler::findJournalInSuperblock() {
         // Traditional direct block pointers
         uint32_t* first_block = reinterpret_cast<uint32_t*>(&journal_inode[40]);
         journal_block = *first_block;
-        std::cout << "Debug: Direct block pointer = " << journal_block << std::endl;
+        if (verbose) std::cout << "Debug: Direct block pointer = " << journal_block << std::endl;
     }
     
     if (journal_block == 0) {
@@ -348,7 +352,7 @@ bool ImageHandler::validateJournalMagic(long offset) {
     uint32_t jbd2_magic = 0x9839B3C0; // Little-endian representation of big-endian 0xC03B3998
     uint32_t jbd_magic = 0x98393BC0;  // JBD (EXT3) magic - different byte order
     
-    std::cout << "Debug: Magic at offset " << offset << " = 0x" << std::hex << *magic 
+    if (verbose) std::cout << "Debug: Magic at offset " << offset << " = 0x" << std::hex << *magic 
               << " (expected JBD2: 0x" << jbd2_magic << " or JBD: 0x" << jbd_magic << ")" << std::dec << std::endl;
     
     // Try both JBD2 (EXT4) and JBD (EXT3) magic numbers
@@ -356,17 +360,17 @@ bool ImageHandler::validateJournalMagic(long offset) {
     bool is_jbd = (*magic == jbd_magic);
     
     if (is_jbd2) {
-        std::cout << "Debug: Found JBD2 (EXT4) journal magic" << std::endl;
+        if (verbose) std::cout << "Debug: Found JBD2 (EXT4) journal magic" << std::endl;
     } else if (is_jbd) {
-        std::cout << "Debug: Found JBD (EXT3) journal magic" << std::endl;
+        if (verbose) std::cout << "Debug: Found JBD (EXT3) journal magic" << std::endl;
     } else {
         // Also try the reverse byte order in case of endianness issues
         uint32_t reversed_magic = 0xC03B3998; // Big-endian format
         if (*magic == reversed_magic) {
-            std::cout << "Debug: Found journal magic in big-endian format" << std::endl;
+            if (verbose) std::cout << "Debug: Found journal magic in big-endian format" << std::endl;
             return true;
         }
-        std::cout << "Debug: No valid journal magic found" << std::endl;
+        if (verbose) std::cout << "Debug: No valid journal magic found" << std::endl;
     }
     
     return (is_jbd2 || is_jbd);
